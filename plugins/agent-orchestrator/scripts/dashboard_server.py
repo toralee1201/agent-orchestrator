@@ -167,6 +167,22 @@ class DashboardState:
         state = status.get("state")
         if state == "succeeded":
             state = status.get("acceptance_state", "awaiting_review")
+        current_work = jobs.plan_item_title(
+            status.get("plan_id"), status.get("checklist_item")
+        )
+        if not current_work:
+            current_work = (
+                progress[-1].get("message") if progress else status.get("role")
+            )
+        phase = status.get("current_phase")
+        if not phase:
+            execution_state = status.get("execution_state")
+            if execution_state in ACTIVE:
+                phase = "starting" if execution_state == "starting" else "running"
+            elif execution_state == "succeeded":
+                phase = "complete"
+            else:
+                phase = execution_state
         questions = [
             {
                 **{
@@ -196,16 +212,14 @@ class DashboardState:
             "state": state,
             "execution_state": status.get("execution_state"),
             "review_state": status.get("review_state"),
-            "phase": status.get("current_phase"),
+            "phase": phase,
             "elapsed_seconds": jobs.elapsed_seconds(status),
             "created_at": status.get("created_at"),
             "updated_at": latest.get("at")
             or status.get("finished_at")
             or status.get("created_at"),
             "recent_message": progress[-1].get("message") if progress else None,
-            "current_work": (
-                progress[-1].get("message") if progress else status.get("role")
-            ),
+            "current_work": current_work,
             "changed_files": len(files) if files is not None else None,
             "usage": status.get("usage_summary"),
             "pending_questions": questions,

@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import errno
 import fnmatch
-import fcntl
 from contextlib import contextmanager
 import hashlib
 import json
@@ -17,11 +17,17 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import webbrowser
 from pathlib import Path
 from typing import Any
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 MAX_TASK_BYTES = 1_000_000
@@ -428,20 +434,14 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
     },
     "opencode": {
         "display_name": "OpenCode",
-        "description": "Run an OpenCode implementation worker in the selected workspace.",
+        "description": "Run OpenCode's non-interactive CLI in the selected workspace.",
         "maturity": "stable",
+        "docs_url": "https://opencode.ai/v2/docs/cli/",
         "install_hint": "Install and configure OpenCode, then ensure `opencode` is on PATH.",
-        "argv": [
-            "opencode",
-            "--cwd",
-            "{workspace}",
-            "--quiet",
-            "--output-format",
-            "text",
-            "--prompt",
-            "{prompt_text}",
-        ],
+        "argv": ["opencode", "run", "--format", "json", "{prompt_text}"],
         "prompt_transport": "arg",
+        "model_args": ["--model", "{model}"],
+        "discover_models_argv": ["opencode", "models"],
     },
     "cursor": {
         "display_name": "Cursor CLI",
@@ -630,16 +630,40 @@ def pending_questions(path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def lock_file(fd: int) -> None:
+    if os.name != "nt":
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return
+    while True:
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
+            time.sleep(0.05)
+
+
+def unlock_file(fd: int) -> None:
+    if os.name != "nt":
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    os.lseek(fd, 0, os.SEEK_SET)
+    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
 @contextmanager
 def record_lock(path: Path):
     """Serialize CLI and threaded HTTP transitions, including worker expiry."""
     lock_path = path.with_suffix(".lock")
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | nofollow, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        lock_file(fd)
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        unlock_file(fd)
         os.close(fd)
 
 
@@ -1742,6 +1766,22 @@ def read_plan(plan_id: str) -> tuple[Path, dict[str, Any]]:
     return path, read_json(path / "plan.json")
 
 
+def plan_item_title(plan_id: Any, item_id: Any) -> str | None:
+    if not isinstance(plan_id, str) or not plan_id:
+        return None
+    if not isinstance(item_id, str) or not item_id:
+        return None
+    try:
+        _, plan = read_plan(plan_id)
+    except RunnerError:
+        return None
+    item = next(
+        (item for item in plan.get("items", []) if item.get("id") == item_id), None
+    )
+    title = item.get("title") if isinstance(item, dict) else None
+    return title.strip()[:180] if isinstance(title, str) and title.strip() else None
+
+
 def save_plan(path: Path, plan: dict[str, Any]) -> None:
     plan["updated_at"] = utc_now()
     counts: dict[str, int] = {}
@@ -2383,11 +2423,94 @@ def job_dir(job_id: str, must_exist: bool = True) -> Path:
 def pid_alive(pid: Any) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        wait_for_single_object = kernel32.WaitForSingleObject
+        wait_for_single_object.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        wait_for_single_object.restype = wintypes.DWORD
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        synchronize = 0x00100000
+        handle = open_process(synchronize, False, pid)
+        if not handle:
+            error = ctypes.get_last_error()
+            if error == 5:  # Access denied means the process exists but is not inspectable.
+                return True
+            if error in {6, 87}:  # Invalid handle or PID.
+                return False
+            raise OSError(error, ctypes.FormatError(error))
+        try:
+            result = wait_for_single_object(handle, 0)
+            if result == 0x00000102:  # WAIT_TIMEOUT: process is still running.
+                return True
+            if result == 0x00000000:  # WAIT_OBJECT_0: process has exited.
+                return False
+            error = ctypes.get_last_error()
+            if error == 5:
+                return True
+            raise OSError(error, ctypes.FormatError(error))
+        finally:
+            close_handle(handle)
     try:
         os.kill(pid, 0)
         return True
     except (ProcessLookupError, PermissionError):
         return False
+
+
+def process_group_popen_kwargs() -> dict[str, Any]:
+    """Start a child in a separately signalable process group on each platform."""
+    if os.name == "nt":
+        return {
+            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
+            "close_fds": True,
+        }
+    return {"start_new_session": True, "close_fds": True}
+
+
+def opencode_progress_from_event(value: Any) -> tuple[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    event_type = str(value.get("type", "")).casefold().replace("-", "_")
+    return {
+        "step_start": ("thinking", "OpenCode is analyzing the task"),
+        "text": ("responding", "OpenCode is preparing a response"),
+        "tool_use": ("using_tools", "OpenCode is using a tool"),
+        "step_finish": ("step_complete", "OpenCode completed a step"),
+        "error": ("error", "OpenCode reported an error"),
+    }.get(event_type)
+
+
+def capture_child_stdout(
+    stream: Any, output: Any, job_path: Path, cli: str
+) -> None:
+    """Persist piped output and publish terse progress for structured OpenCode events."""
+    last_phase: str | None = None
+    try:
+        for line in iter(stream.readline, b""):
+            output.write(line)
+            output.flush()
+            if cli != "opencode":
+                continue
+            try:
+                event = json.loads(line.decode("utf-8", errors="replace"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            progress = opencode_progress_from_event(event)
+            if progress and progress[0] != last_phase:
+                phase, message = progress
+                add_event(job_path, "worker_progress", phase=phase, message=message)
+                last_phase = phase
+    finally:
+        stream.close()
 
 
 def usage_summary(log_path: Path) -> dict[str, Any] | None:
@@ -2403,6 +2526,43 @@ def usage_summary(log_path: Path) -> dict[str, Any] | None:
                 except json.JSONDecodeError:
                     continue
                 fields: dict[str, Any] = {}
+
+                # JSON values are not always objects: several CLIs emit top-level
+                # arrays, so the OpenCode shape check must not assume a dict.
+                if isinstance(value, dict):
+                    event_type = str(value.get("type", "")).casefold().replace(
+                        "-", "_"
+                    )
+                    if event_type == "step_finish":
+                        part = value.get("part")
+                        part = part if isinstance(part, dict) else {}
+                        tokens = part.get("tokens")
+                        tokens = tokens if isinstance(tokens, dict) else {}
+                        cache = tokens.get("cache")
+                        cache = cache if isinstance(cache, dict) else {}
+                        token_fields = {
+                            "input_tokens": tokens.get("input"),
+                            "output_tokens": tokens.get("output"),
+                            "reasoning_tokens": tokens.get("reasoning"),
+                            "cache_read_tokens": cache.get("read"),
+                            "cache_write_tokens": cache.get("write"),
+                        }
+                        fields.update(
+                            {
+                                key: number
+                                for key, number in token_fields.items()
+                                if isinstance(number, (int, float))
+                                and not isinstance(number, bool)
+                            }
+                        )
+                        cost = part.get("cost")
+                        if isinstance(cost, (int, float)) and not isinstance(
+                            cost, bool
+                        ):
+                            fields["total_cost_usd"] = cost
+                        if fields:
+                            latest = {"provider_reported": True, **fields}
+                            continue
 
                 def visit(node: Any) -> None:
                     if isinstance(node, dict):
@@ -2654,6 +2814,7 @@ def discovery_result(
             {"discovery": "unavailable", "error": f"Executable not found: {command[0]}"}
         )
         return result
+    command[0] = executable
     try:
         completed = subprocess.run(
             command,
@@ -3090,8 +3251,7 @@ def command_launch(args: argparse.Namespace) -> int:
         stdin=subprocess.DEVNULL,
         stdout=runner_log,
         stderr=runner_log,
-        start_new_session=True,
-        close_fds=True,
+        **process_group_popen_kwargs(),
     )
     runner_log.close()
     meta["worker_pid"] = worker.pid
@@ -3122,6 +3282,28 @@ def command_launch(args: argparse.Namespace) -> int:
 
 
 def terminate_process_group(pid: int, force: bool = False) -> None:
+    if os.name == "nt":
+        if not force:
+            try:
+                os.kill(pid, signal.CTRL_BREAK_EVENT)
+                return
+            except OSError:
+                pass
+        command = ["taskkill", "/PID", str(pid), "/T"]
+        if force:
+            command.append("/F")
+        try:
+            subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return
     try:
         os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
     except ProcessLookupError:
@@ -3182,14 +3364,19 @@ def command_worker(args: argparse.Namespace) -> int:
             else:
                 stdin_handle = subprocess.DEVNULL
             try:
+                structured_opencode = (
+                    meta.get("agent") == "opencode"
+                    and "--format" in command
+                    and command[command.index("--format") + 1 :][:1] == ["json"]
+                )
+                reader_thread: threading.Thread | None = None
                 child = subprocess.Popen(
                     command,
                     cwd=workspace,
                     stdin=stdin_handle,
-                    stdout=stdout_handle,
+                    stdout=subprocess.PIPE if structured_opencode else stdout_handle,
                     stderr=stderr_handle,
-                    start_new_session=True,
-                    close_fds=True,
+                    **process_group_popen_kwargs(),
                 )
                 meta.update(
                     {
@@ -3200,6 +3387,25 @@ def command_worker(args: argparse.Namespace) -> int:
                 )
                 write_json(meta_path, meta)
                 add_event(path, "agent_started", child_pid=child.pid)
+                task_title = plan_item_title(
+                    meta.get("plan_id"), meta.get("checklist_item")
+                )
+                role = meta.get("role")
+                add_event(
+                    path,
+                    "worker_progress",
+                    phase="starting",
+                    message=task_title
+                    or (role if isinstance(role, str) and role.strip() else None)
+                    or f"{meta.get('agent') or 'Agent'} started",
+                )
+                if structured_opencode and child.stdout is not None:
+                    reader_thread = threading.Thread(
+                        target=capture_child_stdout,
+                        args=(child.stdout, stdout_handle, path, "opencode"),
+                        daemon=True,
+                    )
+                    reader_thread.start()
                 deadline = time.monotonic() + meta["timeout_seconds"]
                 while child.poll() is None and time.monotonic() < deadline:
                     write_json(
@@ -3237,6 +3443,8 @@ def command_worker(args: argparse.Namespace) -> int:
                         exit_code = child.wait()
                 else:
                     exit_code = child.returncode
+                if reader_thread is not None:
+                    reader_thread.join()
             finally:
                 if hasattr(stdin_handle, "close"):
                     stdin_handle.close()
@@ -3836,8 +4044,7 @@ def command_ensure_dashboard(args: argparse.Namespace) -> int:
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=log,
-                start_new_session=True,
-                close_fds=True,
+                **process_group_popen_kwargs(),
             )
             log.close()
             deadline = time.monotonic() + 5

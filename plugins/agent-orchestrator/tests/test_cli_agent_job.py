@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import io
 import os
 import signal
 import subprocess
@@ -634,6 +635,196 @@ class CliAgentJobTests(unittest.TestCase):
             self.assertEqual(models["choices"][0]["id"], "smart-model")
             self.assertEqual(models["choices"][0]["reasoning_efforts"], ["low", "high"])
             self.assertNotIn("private_payload", json.dumps(models))
+
+    def test_usage_summary_reads_opencode_step_finish_tokens_and_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp) / "stdout.log"
+            log.write_text(
+                json.dumps(
+                    {
+                        "type": "step_finish",
+                        "part": {
+                            "tokens": {
+                                "input": 120,
+                                "output": 30,
+                                "reasoning": 4,
+                                "cache": {"read": 15, "write": 2},
+                            },
+                            "cost": 0.0042,
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            usage = runner.usage_summary(log)
+
+        self.assertTrue(usage["provider_reported"])
+        self.assertEqual(usage["input_tokens"], 120)
+        self.assertEqual(usage["output_tokens"], 30)
+        self.assertEqual(usage["reasoning_tokens"], 4)
+        self.assertEqual(usage["cache_read_tokens"], 15)
+        self.assertEqual(usage["cache_write_tokens"], 2)
+        self.assertEqual(usage["total_cost_usd"], 0.0042)
+
+    def test_usage_summary_tolerates_array_and_scalar_json_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            array_only = root / "array-only.log"
+            array_only.write_text(
+                json.dumps([{"type": "step_finish"}, "text", 7]) + "\n",
+                encoding="utf-8",
+            )
+            mixed = root / "mixed.log"
+            mixed.write_text(
+                json.dumps([{"type": "step_finish"}, "text", 7])
+                + "\n"
+                + json.dumps({"type": "result", "usage": {"output_tokens": 9}})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(runner.usage_summary(array_only))
+            usage = runner.usage_summary(mixed)
+
+        self.assertTrue(usage["provider_reported"])
+        self.assertEqual(usage["output_tokens"], 9)
+
+    def test_opencode_json_event_maps_to_safe_progress_summary(self) -> None:
+        progress = runner.opencode_progress_from_event(
+            {"type": "tool_use", "part": {"tool": "powershell", "callID": "secret"}}
+        )
+
+        self.assertEqual(progress, ("using_tools", "OpenCode is using a tool"))
+
+    def test_opencode_json_stream_is_logged_and_publishes_dashboard_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            job_path = Path(temp) / "job"
+            job_path.mkdir()
+            events = [
+                {"type": "step_start"},
+                {"type": "text", "part": {"text": "private report text"}},
+                {"type": "tool_use", "part": {"tool": "powershell"}},
+                {
+                    "type": "step_finish",
+                    "part": {
+                        "tokens": {"input": 18, "output": 6},
+                        "cost": 0.002,
+                    },
+                },
+            ]
+            captured = io.BytesIO()
+            runner.capture_child_stdout(
+                io.BytesIO("".join(json.dumps(item) + "\n" for item in events).encode()),
+                captured,
+                job_path,
+                "opencode",
+            )
+            log = job_path / "stdout.log"
+            log.write_bytes(captured.getvalue())
+
+            progress = [
+                event
+                for event in runner.read_events(job_path)
+                if event.get("type") == "worker_progress"
+            ]
+            usage = runner.usage_summary(log)
+
+        self.assertEqual(
+            [event["phase"] for event in progress],
+            ["thinking", "responding", "using_tools", "step_complete"],
+        )
+        self.assertNotIn("private report text", json.dumps(progress))
+        self.assertEqual(usage["input_tokens"], 18)
+        self.assertEqual(usage["output_tokens"], 6)
+        self.assertEqual(usage["total_cost_usd"], 0.002)
+
+    def test_opencode_worker_stream_updates_progress_and_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            task = root / "task.md"
+            self.write_structured_task(task)
+            script = (
+                "import json; events=["
+                "{'type':'step_start'},"
+                "{'type':'tool_use','part':{'tool':'powershell'}},"
+                "{'type':'step_finish','part':{'tokens':{'input':18,'output':6},'cost':0.002}}"
+                "]; [print(json.dumps(event),flush=True) for event in events]"
+            )
+            config = root / "agents.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "agents": {
+                            "opencode": {
+                                "argv": [
+                                    sys.executable,
+                                    "-c",
+                                    script,
+                                    "{prompt_text}",
+                                    "--format",
+                                    "json",
+                                ],
+                                "prompt_transport": "arg",
+                                "models": ["fake-model"],
+                                "model_args": ["--model", "{model}"],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
+
+            launched = self.run_cli(
+                "launch",
+                "--cli",
+                "opencode",
+                "--model",
+                "fake-model",
+                "--approved-executor",
+                "opencode=fake-model",
+                "--workspace",
+                str(workspace),
+                "--task-file",
+                str(task),
+                "--config",
+                str(config),
+                "--no-notify",
+                "--timeout-seconds",
+                "10",
+                "--json",
+                env=env,
+            )
+            job_id = json.loads(launched.stdout)["job_id"]
+            waited = self.run_cli(
+                "wait",
+                job_id,
+                "--timeout-seconds",
+                "10",
+                "--poll-seconds",
+                "0.1",
+                "--json",
+                env=env,
+            )
+
+            status = json.loads(waited.stdout)
+            job_path = root / "state" / "jobs" / job_id
+            phases = [
+                event["phase"]
+                for event in runner.read_events(job_path)
+                if event.get("type") == "worker_progress"
+            ]
+
+        self.assertEqual(status["state"], "succeeded")
+        self.assertEqual(status["current_phase"], "step_complete")
+        self.assertEqual(status["usage_summary"]["input_tokens"], 18)
+        self.assertEqual(status["usage_summary"]["total_cost_usd"], 0.002)
+        self.assertEqual(phases, ["starting", "thinking", "using_tools", "step_complete"])
 
     def test_quality_route_plan_usage_and_review_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

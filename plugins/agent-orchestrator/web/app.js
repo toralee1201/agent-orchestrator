@@ -49,6 +49,7 @@
   function tone(item) { return item.attention_required ? 'amber' : item.active ? 'blue' : item.state === 'accepted' || item.completed ? 'green' : 'neutral'; }
   function dot(color) { const el = node('span', null, `dot ${color}`); el.setAttribute('aria-hidden', 'true'); return el; }
   function statusLabel(job) { return ({ needs_input: 'Needs answer', awaiting_review: 'Awaiting review', accepted: 'Accepted', running: 'Running', lost: 'Disconnected' })[job.state] || label(job.state); }
+  function usageLabel(job) { return job.usage ? 'reported' : job.cli === 'opencode' ? 'not emitted' : 'unavailable'; }
   function agentName(job) { return job.cli_agent || job.model || job.cli || job.job_id; }
   function metric(title, value, detail) {
     const el = node('div', null, 'metric');
@@ -157,7 +158,7 @@
       button.querySelector('.dot').className = `dot ${tone(j)}`;
       button.querySelector('span:last-child').textContent = agentName(j);
       cells[0].querySelector('small').textContent = j.role || 'Worker';
-      const values = [[j.cli || 'Configured CLI', j.model || 'Configured model'], [j.current_work || 'No progress message yet', `${count(j.changed_files)} files · Usage ${j.usage ? 'reported' : 'unavailable'}`], [label(j.phase), j.recent_message ? 'Worker update' : 'Awaiting update'], [elapsed(j.elapsed_seconds), ''], [statusLabel(j), `Review: ${label(j.review_state)}`]];
+      const values = [[j.cli || 'Configured CLI', j.model || 'Configured model'], [j.current_work || 'No task description', `${count(j.changed_files)} files · Usage ${usageLabel(j)}`], [label(j.phase), j.recent_message ? 'Worker update' : 'Lifecycle status'], [elapsed(j.elapsed_seconds), ''], [statusLabel(j), `Review: ${label(j.review_state)}`]];
       values.forEach(([primary, secondary], i) => { cells[i + 1].firstChild.textContent = primary; cells[i + 1].lastChild.textContent = secondary; });
       cells[5].firstChild.prepend(dot(tone(j)));
     });
@@ -281,7 +282,7 @@
       const evidence = j.review?.tests || [];
       if (evidence.length) { const list = node('ul'); evidence.forEach(test => list.append(node('li', test))); tests.append(list, node('p', `Recorded by ${j.review.reviewer} · ${when(j.review.reviewed_at)}`, 'muted')); }
       else tests.append(node('p', 'No independent test evidence recorded. Test counts are not inferred from logs.', 'muted'));
-      const usage = $('usage'); usage.replaceChildren(node('p', j.usage ? 'Latest provider-reported snapshot. This may not represent cumulative usage.' : 'Usage is unavailable. This CLI has not reported token or cost data.', 'muted'));
+      const usage = $('usage'); usage.replaceChildren(node('p', j.usage ? 'Latest provider-reported snapshot. This may not represent cumulative usage.' : j.cli === 'opencode' ? 'This OpenCode job did not report a token or cost snapshot. Older text-mode runs cannot be backfilled, and newer JSON-mode runs may also omit usage when the provider does not return it.' : 'Usage is unavailable. This CLI has not reported token or cost data.', 'muted'));
       if (j.usage) { const list = node('dl'); Object.entries(j.usage).filter(([key]) => key !== 'provider_reported').forEach(([key, value]) => list.append(node('dt', label(key)), node('dd', count(value)))); usage.append(list); }
       $('stdout').textContent = j.logs.stdout || 'No output yet.'; $('stderr').textContent = j.logs.stderr || 'No errors reported.';
       renderQuestions(j.questions.filter(q => q.state === 'pending').map(q => ({ ...q, source: 'worker' })));

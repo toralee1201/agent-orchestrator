@@ -168,6 +168,52 @@ class DashboardTests(unittest.TestCase):
         self.assertIsNone(row["changed_files"])
         self.assertTrue(row["attention_required"])
 
+    def test_job_uses_plan_item_and_running_phase_before_first_worker_update(self):
+        plan_id = "profile-analysis"
+        jobs.write_json(
+            jobs.plans_dir() / plan_id / "plan.json",
+            {
+                "plan_id": plan_id,
+                "workspace": str(self.workspaces[3]),
+                "title": "User profile analysis",
+                "items": [
+                    {
+                        "id": "item-001",
+                        "title": "Measure user profile directory sizes",
+                        "state": "in_progress",
+                        "job_ids": ["gamma"],
+                    }
+                ],
+            },
+        )
+        job_path = jobs.job_dir("gamma", must_exist=False)
+        jobs.write_json(
+            job_path / "meta.json",
+            {
+                "job_id": "gamma",
+                "workspace": str(self.workspaces[3]),
+                "worker_pid": os.getpid(),
+                "state": "running",
+                "created_at": jobs.utc_now(),
+                "cli": "opencode",
+                "model": "opencode/deepseek-v4.1-flash-free",
+                "plan_id": plan_id,
+                "checklist_item": "item-001",
+                "git_baseline": {},
+            },
+        )
+        jobs.add_event(job_path, "agent_started")
+
+        status, _, raw = self.request("/api/overview")
+
+        self.assertEqual(status, 200)
+        project = next(
+            item for item in json.loads(raw)["projects"] if item["name"] == "Plan only"
+        )
+        row = next(item for item in project["jobs"] if item["job_id"] == "gamma")
+        self.assertEqual(row["current_work"], "Measure user profile directory sizes")
+        self.assertEqual(row["phase"], "running")
+
     def test_selected_detail_has_only_short_local_logs_and_review_evidence(self):
         path = jobs.job_dir("alpha")
         (path / "stdout.log").write_text("s" * 20000 + "\x1b[31mTAIL\x1b[0m")
@@ -329,6 +375,10 @@ class DashboardTests(unittest.TestCase):
         self.assertIn(".agents-sidebar", styles)
         self.assertIn(".agent-nav-button[aria-current=true]", styles)
         self.assertIn("position:fixed", styles)
+        self.assertIn("function usageLabel(job)", script)
+        self.assertIn("did not report a token or cost snapshot", script)
+        self.assertIn("cannot be backfilled", script)
+        self.assertNotIn("This OpenCode job used formatted text output", script)
 
     def test_authentication_host_and_origin_boundary(self):
         self.assertEqual(self.request("/api/overview", authenticated=False)[0], 401)

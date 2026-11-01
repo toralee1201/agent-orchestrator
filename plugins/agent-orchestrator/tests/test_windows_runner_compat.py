@@ -81,21 +81,39 @@ class RunnerProcessCompatibilityTests(unittest.TestCase):
             self.assertNotIn("--quiet", command)
 
     def test_opencode_model_discovery_uses_resolved_windows_executable(self) -> None:
+        resolved = r"C:\Users\ci\AppData\Local\opencode\bin\opencode.exe"
+        model = "opencode/gpt-5.4-nano"
         profile = runner.validate_profile(
             "opencode", runner.BUILTIN_PROFILES["opencode"]
         )
-
-        discovery = runner.discovery_result(
-            profile,
-            "discover_models_argv",
-            Path.cwd(),
-            None,
-            10,
-            False,
+        completed = subprocess.CompletedProcess(
+            args=[resolved, "models"],
+            returncode=0,
+            stdout=f"{model}\nanthropic/claude-sonnet-4.5\n",
+            stderr="",
         )
 
+        with (
+            mock.patch.object(runner.shutil, "which", return_value=resolved) as which,
+            mock.patch.object(
+                runner.subprocess, "run", return_value=completed
+            ) as run,
+        ):
+            discovery = runner.discovery_result(
+                profile,
+                "discover_models_argv",
+                Path.cwd(),
+                None,
+                10,
+                False,
+            )
+
+        which.assert_called_once_with("opencode")
+        self.assertEqual(run.call_count, 1)
+        invoked_command = run.call_args.args[0]
+        self.assertEqual(invoked_command, [resolved, "models"])
         self.assertEqual(discovery["discovery"], "succeeded", discovery)
-        self.assertIn("opencode/gpt-5.4-nano", discovery.get("output", ""))
+        self.assertIn(model, discovery["output"])
 
     def test_ensure_dashboard_starts_and_reuses_detached_server(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

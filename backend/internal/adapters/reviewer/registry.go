@@ -28,6 +28,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/opencode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/opencodev2"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/pi"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/qoder"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
@@ -64,6 +65,7 @@ func Constructors() []Adapter {
 		opencode.New(),
 		opencodev2.New(),
 		pi.New(),
+		qoder.New(),
 	}
 }
 

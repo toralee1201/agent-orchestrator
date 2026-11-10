@@ -9,6 +9,8 @@ describe("AGENT_OPTIONS", () => {
 		expect(AGENT_OPTIONS.filter((agent) => agent === "omp")).toHaveLength(1);
 		expect(AGENT_OPTIONS.filter((agent) => agent === "codewhale")).toHaveLength(1);
 		expect(AGENT_OPTIONS.filter((agent) => agent === "openhands")).toHaveLength(1);
+		expect(AGENT_OPTIONS.filter((agent) => agent === "qoder")).toHaveLength(1);
+		expect(agentLabel("qoder")).toBe("Qoder");
 		expect(new Set(AGENT_OPTIONS).size).toBe(AGENT_OPTIONS.length);
 	});
 	it("uses the concise DeepSeek display name", () => {

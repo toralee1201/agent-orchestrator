@@ -56,6 +56,7 @@ func TestPlansMatchAuthenticationMatrix(t *testing.T) {
 		{"openhands", "Set up OpenHands", "openhands", "Native first-run LLM settings; Orchestrator forwards terminal input without persisting or logging the raw input, while OpenHands stores settings in ~/.openhands", "https://docs.openhands.dev/openhands/usage/cli/quick-start", "", ActionSetup, []string{"openhands"}},
 		{"command-code", "Log in to Command Code", "command-code", "Native browser flow; an API key can be pasted in the terminal", "https://commandcode.ai/docs/quickstart", "", ActionLogin, []string{"command-code", "login"}},
 		{"hermes", "Set up Hermes Agent", "hermes", "Native provider setup: choose a provider, then paste an API key or finish its OAuth flow", "https://hermes-agent.nousresearch.com/docs", "", ActionSetup, []string{"hermes", "model"}},
+		{"qoder", "Set up Qoder", "", "Sign in inside the Qoder CLI. AO does not write Qoder settings", "https://qoder.com/", "", ActionSetup, nil},
 	}
 
 	svc := New(foundExecutables(cases), nil)
@@ -72,7 +73,7 @@ func TestPlansMatchAuthenticationMatrix(t *testing.T) {
 		// with no command to drive. DeepSeek Harness has no login subcommand either,
 		// but its web profile serves the Models page that writes the credential, so
 		// its setup is a terminal plan.
-		case "aider", "unreal-agent", "memcode":
+		case "aider", "unreal-agent", "memcode", "qoder":
 			wantLaunchMode = LaunchDocumentation
 		}
 		if seen[got.AgentID] {

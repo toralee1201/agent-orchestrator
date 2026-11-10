@@ -20,7 +20,7 @@ func TestEveryRefreshHarnessResumesExactConversation(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX executable fixtures")
 	}
-	binaries := map[string]string{"claude-code": "claude", "codex": "codex", "opencode": "opencode", "opencode-v2": "opencode", "grok": "grok", "cursor": "cursor-agent", "qwen": "qwen", "gemini": "gemini", "copilot": "copilot", "kimi": "kimi", "muse": "muse", "droid": "droid", "amp": "amp", "agy": "agy", "crush": "crush", "goose": "goose", "auggie": "auggie", "devin": "devin", "omp": "omp", "codewhale": "codewhale", "openhands": "openhands", "cline": "cline", "kiro": "kiro-cli", "kilocode": "kilo", "vibe": "vibe", "pi": "pi", "kimchi": "kimchi", "prime-agent": "prime-agent", "autohand": "autohand", "fx": "fx", "command-code": "cmd", "mimo-code": "mimo"}
+	binaries := map[string]string{"claude-code": "claude", "codex": "codex", "opencode": "opencode", "opencode-v2": "opencode", "grok": "grok", "cursor": "cursor-agent", "qwen": "qwen", "gemini": "gemini", "copilot": "copilot", "kimi": "kimi", "muse": "muse", "droid": "droid", "amp": "amp", "agy": "agy", "crush": "crush", "goose": "goose", "auggie": "auggie", "devin": "devin", "omp": "omp", "codewhale": "codewhale", "openhands": "openhands", "cline": "cline", "kiro": "kiro-cli", "kilocode": "kilo", "vibe": "vibe", "pi": "pi", "kimchi": "kimchi", "prime-agent": "prime-agent", "autohand": "autohand", "fx": "fx", "command-code": "cmd", "mimo-code": "mimo", "qoder": "qoder"}
 	for _, harness := range agentregistry.Harnessed() {
 		t.Run(string(harness.Harness), func(t *testing.T) {
 			capability, ok := harness.Agent.(ports.AgentTerminalVersionRefresher)

@@ -16903,6 +16903,7 @@ components:
           - auggie
           - cline
           - autohand
+          - qoder
           type: string
         scmStatus:
           enum:
@@ -18177,6 +18178,7 @@ components:
           - command-code
           - memcode
           - hermes
+          - qoder
           - fake
           type: string
         approvalMode:
@@ -18914,6 +18916,7 @@ components:
           - command-code
           - memcode
           - hermes
+          - qoder
           - cloudflared
           - cua-driver
           type: string
@@ -21817,6 +21820,7 @@ components:
           - auggie
           - cline
           - autohand
+          - qoder
           type: string
       type: object
     SetTurnAutoResumeRequest:
@@ -22430,6 +22434,7 @@ components:
           - command-code
           - memcode
           - hermes
+          - qoder
           type: string
         issueId:
           type: string
@@ -22999,6 +23004,7 @@ components:
           - auggie
           - cline
           - autohand
+          - qoder
           type: string
         interfaceMode:
           enum:

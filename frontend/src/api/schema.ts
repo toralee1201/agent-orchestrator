@@ -5807,7 +5807,7 @@ export interface components {
             requestedOutput?: "artifact";
             reviewerConfig?: components["schemas"]["AgentConfig"];
             /** @enum {string} */
-            reviewerHarness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "opencode-v2" | "kiro" | "pi" | "agy" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand";
+            reviewerHarness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "opencode-v2" | "kiro" | "pi" | "agy" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand" | "codebuddy";
             /** @enum {string} */
             scmStatus?: "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "commented" | "approved" | "mergeable" | "merged";
             staleBinary?: components["schemas"]["SessionStaleBinary"];
@@ -7704,7 +7704,7 @@ export interface components {
         SetSessionReviewerRequest: {
             agentConfig?: components["schemas"]["AgentConfig"];
             /** @enum {string} */
-            harness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "opencode-v2" | "kiro" | "pi" | "agy" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand";
+            harness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "opencode-v2" | "kiro" | "pi" | "agy" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand" | "codebuddy";
         };
         SetTurnAutoResumeRequest: {
             enabled: null | boolean;
@@ -8167,7 +8167,7 @@ export interface components {
             /** @description Turn on the worker session's review auto-inject once a pass has started, so the reviewer's PR review comments reach the worker. */
             enableAutoInject?: boolean;
             /** @enum {string} */
-            harness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "opencode-v2" | "kiro" | "pi" | "agy" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand";
+            harness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "opencode-v2" | "kiro" | "pi" | "agy" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand" | "codebuddy";
             /** @enum {string} */
             interfaceMode?: "chat" | "tui";
             /** @description Restrict the pass to this pull request, attaching it to the session first if AO does not track it yet (never from another active session). Omit to review every eligible PR on the session. */

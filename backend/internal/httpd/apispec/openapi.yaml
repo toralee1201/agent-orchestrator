@@ -16903,6 +16903,7 @@ components:
           - auggie
           - cline
           - autohand
+          - codebuddy
           type: string
         scmStatus:
           enum:
@@ -21819,6 +21820,7 @@ components:
           - auggie
           - cline
           - autohand
+          - codebuddy
           type: string
       type: object
     SetTurnAutoResumeRequest:
@@ -23002,6 +23004,7 @@ components:
           - auggie
           - cline
           - autohand
+          - codebuddy
           type: string
         interfaceMode:
           enum:

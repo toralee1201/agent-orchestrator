@@ -137,7 +137,7 @@ describe("configured but unverified credentials", () => {
 	// The whole point of the "configured" state is that it must not look like
 	// a working credential. Falling through to the known-good branch would
 	// paint an unvalidated — possibly revoked — credential green.
-	it.each(["mimo-code", "hermes", "claude-code"])("omits the verification badge for %s while keeping a neutral tone", (id) => {
+	it.each(["mimo-code", "hermes", "claude-code", "codebuddy"])("omits the verification badge for %s while keeping a neutral tone", (id) => {
 		const [option] = buildRankedAgentOptions({
 			agents: [agent(id, "installed", "configured")],
 			priorityRank,

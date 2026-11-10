@@ -36,8 +36,8 @@ func TestManifestAndRegistry(t *testing.T) {
 	if !found {
 		t.Fatal("codebuddy is not registered")
 	}
-	if !domain.HarnessCodebuddy.IsKnown() {
-		t.Fatal("HarnessCodebuddy is not a known harness")
+	if !domain.HarnessCodeBuddy.IsKnown() {
+		t.Fatal("HarnessCodeBuddy is not a known harness")
 	}
 }
 

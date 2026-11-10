@@ -4,7 +4,7 @@
 // --serve. AO session roles are not CodeBuddy --agent personas. Chat mode is
 // not registered here: the chat worker enables it by adding a driver in
 // backend/internal/adapters/chatdriver/registry.Build so
-// Registry.SupportsChat(domain.HarnessCodebuddy) becomes true. That driver
+// Registry.SupportsChat(domain.HarnessCodeBuddy) becomes true. That driver
 // should pass granted extra roots through AppendGrantedDirectories.
 package codebuddy
 

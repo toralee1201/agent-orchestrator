@@ -43,7 +43,7 @@ const (
 	HarnessOpenHands   AgentHarness = "openhands"
 	HarnessCommandCode AgentHarness = "command-code"
 	HarnessHermes      AgentHarness = "hermes"
-	HarnessCodebuddy   AgentHarness = "codebuddy"
+	HarnessCodeBuddy   AgentHarness = "codebuddy"
 	// HarnessFake is retained for existing test fixtures and historical session
 	// rows, but is not user-selectable.
 	HarnessFake AgentHarness = "fake"
@@ -58,7 +58,7 @@ var AllHarnesses = []AgentHarness{
 	HarnessCline, HarnessKimi, HarnessMuse, HarnessKiro, HarnessKilocode, HarnessVibe, HarnessPi,
 	HarnessKimchi, HarnessPrimeAgent, HarnessAutohand,
 	HarnessOMP, HarnessFX, HarnessUnreal, HarnessCodewhale, HarnessMiMoCode, HarnessDeepSeek, HarnessOpenHands,
-	HarnessCommandCode, HarnessMemcode, HarnessHermes, HarnessCodebuddy,
+	HarnessCommandCode, HarnessMemcode, HarnessHermes, HarnessCodeBuddy,
 }
 
 // IsKnown reports whether h is one of the supported harnesses.

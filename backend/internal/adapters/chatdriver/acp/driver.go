@@ -38,16 +38,24 @@ type Launch struct {
 // construct its process. It intentionally contains no install mechanism: binary
 // ownership stays with the existing agent plugin.
 type LaunchConfig struct {
-	ReconnectOnly   bool
-	SessionID       domain.SessionID
-	DataDir         string
-	WorkspacePath   string
-	Env             map[string]string
-	Model           string
+	ReconnectOnly bool
+	SessionID     domain.SessionID
+	DataDir       string
+	WorkspacePath string
+	Env           map[string]string
+	Model         string
+	// Effort is optional. Empty leaves the provider default. Bindings that
+	// pass it as a launch flag read it here; the ACP session still applies
+	// turn settings after session/new.
+	Effort          string
 	Permissions     ports.PermissionMode
 	SystemPrompt    string
 	DisableTools    bool
 	ProviderScopeID string
+	// AdditionalDirectories are extra workspace roots the session already
+	// grants. Bindings may pass them as launch flags; the ACP session still
+	// sends the normalized list on session/new.
+	AdditionalDirectories []string
 	// ProviderConversationID carries the stored native conversation on resume so
 	// a binding can migrate provider-side history into a fresh process home.
 	// Empty on first start.
@@ -395,9 +403,10 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 	launchCfg := LaunchConfig{
 		SessionID: cfg.SessionID, DataDir: cfg.DataDir, WorkspacePath: cfg.WorkspacePath,
 		Env:   cfg.Env,
-		Model: cfg.Model, Permissions: cfg.Permissions, SystemPrompt: cfg.SystemPrompt,
-		DisableTools:    cfg.DisableTools,
-		ProviderScopeID: cfg.ProviderScopeID,
+		Model: cfg.Model, Effort: cfg.Effort, Permissions: cfg.Permissions, SystemPrompt: cfg.SystemPrompt,
+		DisableTools:          cfg.DisableTools,
+		ProviderScopeID:       cfg.ProviderScopeID,
+		AdditionalDirectories: cfg.AdditionalDirectories,
 	}
 	connectStarted := time.Now()
 	conv, init, live, err := d.connect(ctx, launchCfg, cfg.PrepareEnv)
@@ -561,9 +570,10 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 	launchCfg := LaunchConfig{
 		SessionID: cfg.SessionID, DataDir: cfg.DataDir, WorkspacePath: cfg.WorkspacePath,
 		Env:   cfg.Env,
-		Model: cfg.Model, Permissions: cfg.Permissions, SystemPrompt: cfg.SystemPrompt,
-		ProviderScopeID: cfg.ProviderScopeID,
-		ReconnectOnly:   cfg.ReconnectOnly,
+		Model: cfg.Model, Effort: cfg.Effort, Permissions: cfg.Permissions, SystemPrompt: cfg.SystemPrompt,
+		ProviderScopeID:       cfg.ProviderScopeID,
+		ReconnectOnly:         cfg.ReconnectOnly,
+		AdditionalDirectories: cfg.AdditionalDirectories,
 		// The connect below spawns a fresh process, so a resumed conversation's
 		// provider-side history has to be reachable from the new process home.
 		ProviderConversationID: cfg.ProviderConversationID,

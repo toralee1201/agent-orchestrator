@@ -17,6 +17,7 @@ const (
 	HarnessCrush       AgentHarness = "crush"
 	HarnessCursor      AgentHarness = "cursor"
 	HarnessQwen        AgentHarness = "qwen"
+	HarnessQoder       AgentHarness = "qoder"
 	HarnessGemini      AgentHarness = "gemini"
 	HarnessCopilot     AgentHarness = "copilot"
 	HarnessGoose       AgentHarness = "goose"
@@ -53,7 +54,7 @@ const (
 var AllHarnesses = []AgentHarness{
 	HarnessClaudeCode, HarnessCodex, HarnessAider, HarnessOpenCode, HarnessOpenCodeV2, HarnessGrok,
 	HarnessDroid, HarnessAmp, HarnessAgy, HarnessCrush, HarnessCursor, HarnessQwen, HarnessGemini,
-	HarnessCopilot, HarnessGoose, HarnessAuggie, HarnessContinue, HarnessDevin,
+	HarnessCopilot, HarnessGoose, HarnessAuggie, HarnessContinue, HarnessDevin, HarnessQoder,
 	HarnessCline, HarnessKimi, HarnessMuse, HarnessKiro, HarnessKilocode, HarnessVibe, HarnessPi,
 	HarnessKimchi, HarnessPrimeAgent, HarnessAutohand,
 	HarnessOMP, HarnessFX, HarnessUnreal, HarnessCodewhale, HarnessMiMoCode, HarnessDeepSeek, HarnessOpenHands,

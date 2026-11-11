@@ -35,9 +35,9 @@ func TestCoordinatorFixedFallbackAndSettlementBatch(t *testing.T) {
 		t.Fatalf("acknowledged = %d, want 2", store.acked)
 	}
 
-	store.add(reportAt("done-1", "worker", now, now.Add(5*time.Minute), "done"))
-	store.add(reportAt("done-2", "worker", now.Add(2*time.Minute), now.Add(7*time.Minute), "later done"))
-	now = now.Add(5 * time.Minute)
+	store.add(reportAt("done-1", "worker", now, now.Add(domain.ReportSettlementWindow), "done"))
+	store.add(reportAt("done-2", "worker", now.Add(2*time.Minute), now.Add(domain.ReportSettlementWindow+2*time.Minute), "later done"))
+	now = now.Add(domain.ReportSettlementWindow)
 	if _, err := c.RunDue(context.Background()); err != nil {
 		t.Fatal(err)
 	}

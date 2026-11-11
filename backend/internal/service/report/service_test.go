@@ -62,7 +62,7 @@ func TestCreateDerivesOwnershipAndFixedDeliveryDeadlines(t *testing.T) {
 		{name: "checkpoint batches for one hour", input: CreateInput{State: domain.ReportCheckpoint, Note: "checkpoint"}, available: now.Add(time.Hour)},
 		{name: "needs input is immediate", input: CreateInput{State: domain.ReportNeedsInput, Note: "decision"}, available: now},
 		{name: "stuck is immediate", input: CreateInput{State: domain.ReportStuck, Note: "blocked"}, available: now},
-		{name: "done settles for five minutes", input: CreateInput{State: domain.ReportDone, Note: "finished"}, available: now.Add(5 * time.Minute), settles: now.Add(5 * time.Minute)},
+		{name: "done settles for one minute", input: CreateInput{State: domain.ReportDone, Note: "finished"}, available: now.Add(time.Minute), settles: now.Add(time.Minute)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -77,6 +77,40 @@ func TestCreateDerivesOwnershipAndFixedDeliveryDeadlines(t *testing.T) {
 				t.Fatalf("report=%+v", r)
 			}
 		})
+	}
+}
+
+func TestCreateDoneReportSettlesInOneMinuteWhileNeedsInputIsImmediate(t *testing.T) {
+	now := time.Date(2026, 9, 7, 1, 2, 3, 0, time.UTC)
+	st := &fakeStore{ok: true, session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker}}
+	s := New(Deps{Store: st, Now: func() time.Time { return now }, NewID: func() string { return "rpt_1" }})
+
+	done, err := s.Create(context.Background(), CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "finished"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done.AvailableAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("done AvailableAt = %s, want %s", done.AvailableAt, now.Add(time.Minute))
+	}
+	if done.AvailableAt.Equal(now) {
+		t.Fatal("done report must not be available immediately")
+	}
+	if done.AvailableAt.Equal(now.Add(5 * time.Minute)) {
+		t.Fatal("done report must no longer use the old five-minute settlement window")
+	}
+	if !done.SettlementDeadline.Equal(done.AvailableAt) {
+		t.Fatalf("done SettlementDeadline = %s, want AvailableAt %s", done.SettlementDeadline, done.AvailableAt)
+	}
+
+	needsInput, err := s.Create(context.Background(), CreateInput{SessionID: "ao-7", State: domain.ReportNeedsInput, Note: "decision"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !needsInput.AvailableAt.Equal(now) {
+		t.Fatalf("needs-input AvailableAt = %s, want immediate %s", needsInput.AvailableAt, now)
+	}
+	if !needsInput.SettlementDeadline.IsZero() {
+		t.Fatalf("needs-input SettlementDeadline = %s, want zero", needsInput.SettlementDeadline)
 	}
 }
 

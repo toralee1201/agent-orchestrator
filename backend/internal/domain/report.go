@@ -49,7 +49,7 @@ const (
 	// ReportBatchFallback is the fixed informational-report fallback deadline.
 	ReportBatchFallback = time.Hour
 	// ReportSettlementWindow is the fixed window opened by a done report.
-	ReportSettlementWindow = 5 * time.Minute
+	ReportSettlementWindow = time.Minute
 )
 
 // ReportState is an optional worker-originated coordination claim.

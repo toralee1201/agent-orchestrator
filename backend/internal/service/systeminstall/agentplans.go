@@ -286,7 +286,7 @@ func (s requestPlanner) agentMethodPlans(target Target, operation AgentOperation
 	case TargetCommandCode:
 		plans = []Plan{s.planNPM(target, "command-code")}
 	case TargetQoder:
-		plans = []Plan{{Target: target, Method: "manual", Unsupported: true, Reason: "Install Qoder so qoder is on PATH. The native Windows launcher is %USERPROFILE%\\.qoder\\bin\\qodercli\\qodercli.exe. An existing install updates with qoder update."}}
+		plans = []Plan{{Target: target, Method: "manual", Unsupported: true, Reason: "Install Qoder so qoder is on PATH. The native Windows launcher is %USERPROFILE%\\.qoder\\bin\\qodercli\\qodercli.exe. AO only reads qoder update --check and does not run the updater."}}
 	default:
 		plans = []Plan{{Target: target, Unsupported: true, Method: "manual", Reason: "unknown install target"}}
 	}
@@ -544,7 +544,6 @@ var vendorUpdateCommands = map[Target][]string{
 	TargetOpencode:   {"opencode", "upgrade", "--method", "curl"},
 	TargetGoose:      {"goose", "update"},
 	TargetHermes:     {"hermes", "update", "--yes"},
-	TargetQoder:      {"qoder", "update"},
 	TargetKimchi:     {"kimchi", "update", "self", "--force"},
 	TargetOMP:        {"omp", "update"},
 	TargetAutohand:   {"autohand", "update"},

@@ -219,7 +219,7 @@ func (s *Service) computeUpdateAdvisory(ctx context.Context, target Target) (Upd
 			plans = built.agentMethodPlans(target, AgentOperationInstall)
 		}
 	}
-	if len(plans) == 0 && s.officialVersion == nil {
+	if len(plans) == 0 && s.officialVersion == nil && target != TargetQoder {
 		advisory.BinaryPath = s.advisoryBinaryPath(ctx, target)
 		return advisory, nil
 	}
@@ -266,7 +266,7 @@ func (s *Service) computeUpdateAdvisory(ctx context.Context, target Target) (Upd
 	if plannerReady && !managedCopy {
 		s.refreshDerivedOwner(ctx, planner, target, verified.ResolvedPath, &source)
 	}
-	if source.Package == "" && s.officialVersion == nil {
+	if source.Package == "" && s.officialVersion == nil && target != TargetQoder {
 		if layout != "" {
 			advisory.Reason = UpdateReasonOwnershipUnconfirmed
 		}
@@ -288,13 +288,20 @@ func (s *Service) computeUpdateAdvisory(ctx context.Context, target Target) (Upd
 		// The update installs a release of AO's own, so it needs neither the
 		// harness's own update command nor the user's copy in a known place.
 		advisory.MaintenanceMethod = "official-installer"
-	} else if home, _ := os.UserHomeDir(); vendorMaintainable(s.goos, target, verified.ResolvedPath, home) {
-		advisory.MaintenanceMethod = "official-installer"
+	} else if target != TargetQoder {
+		if home, _ := os.UserHomeDir(); vendorMaintainable(s.goos, target, verified.ResolvedPath, home) {
+			advisory.MaintenanceMethod = "official-installer"
+		}
 	}
 	var latest string
 	if source.Package != "" {
 		advisory.Source = source.Method
 		latest, err = s.managedVersion(ctx, source)
+	} else if target == TargetQoder {
+		// Qoder publishes no release feed AO fetches. The CLI's read-only
+		// `update --check` names the latest release. AO does not run `qoder update`.
+		advisory.Source = qoderCheckReleaseSource
+		latest, err = qoderLatestVersion(ctx, s.commands, verified.ResolvedPath)
 	} else {
 		// No package manager provably owns the binary, so compare against the
 		// vendor's own release channel, unless the binary sits in another

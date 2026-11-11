@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,10 +178,22 @@ func TestPromptDelivery(t *testing.T) {
 	}
 }
 
-func TestAuthStatusStaysUnknown(t *testing.T) {
-	status, err := qoder.New().AuthStatus(context.Background())
-	if err != nil || status != ports.AgentAuthStatusUnknown {
-		t.Fatalf("status = %q, %v", status, err)
+func TestCmdLauncherRejectsMultilineInstructions(t *testing.T) {
+	plugin := qoder.NewWithBinary(`C:\npm\qoder.cmd`)
+	_, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		SystemPrompt: "line one\nline two",
+	})
+	if err == nil || !strings.Contains(err.Error(), "qoder.cmd") {
+		t.Fatalf("error = %v, want a .cmd newline rejection", err)
+	}
+	cmd, err := qoder.NewWithBinary(`C:\qoder\qodercli.exe`).GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		SystemPrompt: "line one\nline two",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(cmd, "\n"), "line one\nline two") {
+		t.Fatalf("command = %#v, want the multiline prompt kept for a native executable", cmd)
 	}
 }
 

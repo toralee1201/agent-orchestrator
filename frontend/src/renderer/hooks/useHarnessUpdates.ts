@@ -4,7 +4,7 @@ import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import type { components } from "../../api/schema";
 import { appI18n } from "../i18n";
-import { AGENT_OPTIONS, agentLabel, type AgentId } from "../lib/agent-options";
+import { AGENT_OPTIONS, agentLabel, hasManagedInstallTarget, hasUpdateAdvisoryTarget, type AgentId } from "../lib/agent-options";
 import { apiErrorCode, apiErrorDetails, apiErrorMessage } from "../lib/api-client";
 import { clientForSessionHost } from "../lib/host-clients";
 import { LOCAL_HOST } from "../lib/hosts";
@@ -70,6 +70,10 @@ export function isFailedInstallJob(job?: Pick<InstallJob, "status">): boolean {
 	return job?.status === "failed" || job?.status === "unsupported" || job?.status === "interrupted";
 }
 
+export function isHarnessInstallJob(job: InstallJob): job is InstallJob & { target: AgentId } {
+	return (AGENT_OPTIONS as readonly string[]).includes(job.target);
+}
+
 export function upsertInstallJob(current: InstallJob[] | undefined, next: InstallJob): InstallJob[] {
 	return [...(current ?? []).filter((job) => job.target !== next.target), next];
 }
@@ -103,7 +107,7 @@ export function useHarnessUpdates(installed: ReadonlySet<AgentId>, hostId?: stri
 	const queries = useQueries({ queries: AGENT_OPTIONS.map((agentId) => queryOptions({
 		queryKey: updateAdvisoryQueryKey(agentId, hostId),
 		queryFn: async () => syncInstallerMethods(queryClient, await fetchUpdateAdvisory(agentId, hostId), hostId),
-		enabled: enabled && installed.has(agentId),
+		enabled: enabled && installed.has(agentId) && hasUpdateAdvisoryTarget(agentId),
 		staleTime: (query) => updateAdvisoryRefreshInterval(query.state.status === "error"),
 		refetchInterval: (query) => updateAdvisoryRefreshInterval(query.state.status === "error"),
 		// Keep the update badge current while the window is hidden or minimized.
@@ -120,6 +124,7 @@ export function useHarnessUpdates(installed: ReadonlySet<AgentId>, hostId?: stri
  * request finished first.
  */
 function syncInstallerMethods(queryClient: QueryClient, advisory: AgentUpdateAdvisory, hostId?: string): AgentUpdateAdvisory {
+	if (!hasManagedInstallTarget(advisory.agentId as AgentId)) return advisory;
 	const methodId = maintenanceMethodId(advisory);
 	if (!methodId || !hasConfirmedHarnessUpdate(advisory)) return advisory;
 	const plans = queryClient.getQueryData<components["schemas"]["AgentInstallPlan"][]>(installerQueryKeyForHost(hostId));

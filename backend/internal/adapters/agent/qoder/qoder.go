@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -176,14 +177,8 @@ func (*Plugin) SessionInfo(ctx context.Context, session ports.SessionRef) (ports
 	return info, ok, nil
 }
 
-// AuthStatus stays unknown. Qoder sign-in is documented for the person to
-// finish in the CLI. AO does not probe or write Qoder account state.
-func (*Plugin) AuthStatus(ctx context.Context) (ports.AgentAuthStatus, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	return ports.AgentAuthStatusUnknown, nil
-}
+// AuthStatus is defined in auth.go. It runs `qoder status --output json`
+// and reports only the logged_in boolean.
 
 // ResolveBinary resolves `qodercli` or `qoder`, including the Windows native install.
 func (p *Plugin) ResolveBinary(ctx context.Context) (string, error) {
@@ -234,6 +229,9 @@ func buildCommand(binary string, in commandInputs) ([]string, error) {
 	}
 	prompt, err := standingPrompt(in.SystemPrompt, in.SystemPromptFile)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkCmdLauncherTransport(binary, prompt); err != nil {
 		return nil, err
 	}
 	if prompt != "" {
@@ -287,6 +285,21 @@ func appendEffort(cmd *[]string, effort string) error {
 		}
 	}
 	return fmt.Errorf("qoder: unsupported effort %q", effort)
+}
+
+// checkCmdLauncherTransport rejects a Windows .cmd/.bat launcher when the
+// standing instructions contain a newline. cmd.exe ends the command at that
+// newline and drops every flag after it. Native executables keep the argument.
+func checkCmdLauncherTransport(binary, systemPrompt string) error {
+	switch strings.ToLower(filepath.Ext(binary)) {
+	case ".cmd", ".bat":
+	default:
+		return nil
+	}
+	if !strings.ContainsAny(systemPrompt, "\n\r") {
+		return nil
+	}
+	return fmt.Errorf("qoder: standing instructions contain newlines, which the Windows launcher %q cannot carry through cmd.exe; install the native Qoder CLI so AO can start it directly", binary)
 }
 
 func standingPrompt(inline, path string) (string, error) {

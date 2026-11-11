@@ -609,6 +609,30 @@ func TestReadinessCoordinatorAllowsOpenCodeVersionProbeBudget(t *testing.T) {
 	}
 }
 
+func TestReadinessCoordinatorAllowsQoderAuthProbeBudget(t *testing.T) {
+	t.Parallel()
+	agent := &readinessTestAgent{
+		resolve: func(context.Context) (string, error) { return "qoder", nil },
+		auth: func(ctx context.Context) (ports.AgentAuthStatus, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) < 30*time.Second {
+				return ports.AgentAuthStatusUnknown, context.DeadlineExceeded
+			}
+			return ports.AgentAuthStatusAuthorized, nil
+		},
+	}
+	coordinator := newReadinessCoordinator(readinessCoordinatorConfig{
+		Agents: []agentregistry.HarnessAgent{readinessHarness("qoder", "Qoder", agent)},
+	})
+	items, err := coordinator.Ensure(context.Background(), nil, domain.AgentReadinessPurposeDisplay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := items[0].Authentication.State; got != domain.AgentAuthenticationAuthorized {
+		t.Fatalf("authentication = %#v, want authorized within the cold-start budget", items[0].Authentication)
+	}
+}
+
 func TestReadinessCoordinatorDoesNotSurfaceSeparateOpenCodeVersionAsMismatch(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

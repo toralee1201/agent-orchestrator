@@ -109,8 +109,8 @@ export function HarnessAccountTab({ details, hostId, authWorkflowActive, loginPa
 			</HarnessDetailRow> : null}
 		</HarnessDetailGroup>
 		{job && isWaitingForIdleJob(job) ? <div className="-mt-3"><IdleUpdateStatus agentId={details.agentId} job={job} hostId={hostId} onViewSessions={(waiting) => onViewSessions?.(waiting)} /></div> : null}
-		{isInstalled && details.showUpdate && !details.canUpdate ? <p className="-mt-3 text-xs text-settings-muted">{details.updateReason}</p> : null}
-		{isInstalled && details.updateUnknown && !details.advisoryQuery?.isPending && !details.manualOnly ? <p className="-mt-3 text-xs text-settings-muted">{t("settings.harness.updateCheckUnavailable")}</p> : null}
+		{isInstalled && (details.noManagedInstall || (details.showUpdate && !details.canUpdate)) ? <p className="-mt-3 text-xs text-settings-muted">{details.updateReason}</p> : null}
+		{isInstalled && !details.noManagedInstall && details.updateUnknown && !details.advisoryQuery?.isPending && !details.manualOnly ? <p className="-mt-3 text-xs text-settings-muted">{t("settings.harness.updateCheckUnavailable")}</p> : null}
 		{/* A harness with no installable method explains how it is maintained instead. */}
 		{isInstalled && details.manualOnly && plan?.reason && !(details.showUpdate && !details.canUpdate) ? <p className="-mt-3 text-xs text-settings-muted">{plan.reason}</p> : null}
 

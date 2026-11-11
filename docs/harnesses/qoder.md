@@ -8,10 +8,11 @@ existing ACP driver and is not configured from this settings surface.
 
 Install Qoder so `qoder` is on `PATH`. On Windows the native executable is
 `%USERPROFILE%\.qoder\bin\qodercli\qodercli.exe`. AO does not install it
-automatically. An existing install updates with:
+automatically. An existing install updates with `qoder update`. AO itself
+only runs the read-only check:
 
 ```bash
-qoder update
+qoder update --check
 ```
 
 Verify:
@@ -35,3 +36,9 @@ AO approval values stay `default`, `auto`, `accept-edits`, and
 `bypass-permissions`. Qoder's `dont_ask` mode is not an AO permission.
 
 AO does not write Qoder's own settings files. Sign in with `qoder login`.
+The account row reads `qoder status --output json` and uses only its
+`logged_in` boolean. A missing binary, a timeout, or output AO cannot decode
+stays unknown.
+
+On Windows, a `.cmd` launcher cannot carry standing instructions that contain
+newlines. AO refuses that launch and asks for the native `qodercli.exe`.

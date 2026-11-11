@@ -2372,6 +2372,7 @@ WHERE type = 'table' AND name = 'sessions'`,
 	}
 	if !strings.Contains(schema, "'qoder'") {
 		return fmt.Errorf("schema repair: sessions harness constraint is missing qoder")
+	}
 	if !strings.Contains(schema, "'codebuddy'") {
 		return fmt.Errorf("schema repair: sessions harness constraint is missing codebuddy")
 	}

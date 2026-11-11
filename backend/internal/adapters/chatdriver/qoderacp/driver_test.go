@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -126,6 +127,76 @@ func TestLaunchArgs(t *testing.T) {
 	}
 	if sessionMode(ports.PermissionModeAcceptEdits) != "acceptEdits" {
 		t.Fatalf("ACP accept edits = %q", sessionMode(ports.PermissionModeAcceptEdits))
+	}
+}
+
+// TestInstalledQoderAutoStarts exercises the real ACP handshake without sending a prompt.
+func TestInstalledQoderAutoStarts(t *testing.T) {
+	binary, err := exec.LookPath("qodercli")
+	if err != nil {
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			t.Fatal(homeErr)
+		}
+		binary = filepath.Join(home, ".qoder", "bin", "qodercli", "qodercli")
+		if filepath.Separator == '\\' {
+			binary += ".exe"
+		}
+		if _, statErr := os.Stat(binary); errors.Is(statErr, os.ErrNotExist) {
+			t.Skip("qodercli binary is absent")
+		} else if statErr != nil {
+			t.Fatal(statErr)
+		}
+	}
+	driver := newDriver(&fakePlugin{binary: binary}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conv, err := driver.Start(ctx, ports.ChatStartConfig{
+		SessionID: "qoder-real-auto", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
+		Model: "Auto", Effort: "auto",
+	})
+	if err != nil {
+		t.Fatalf("real Qoder ACP startup with Auto: %v", err)
+	}
+	t.Cleanup(func() {
+		if stopper, ok := conv.(interface{ Terminate() error }); ok {
+			_ = stopper.Terminate()
+		}
+	})
+}
+
+func TestStartUsesLaunchModelInsteadOfACPModel(t *testing.T) {
+	for _, model := range []string{"Auto", "Qwen3.8-Flash"} {
+		t.Run(model, func(t *testing.T) {
+			argvPath := filepath.Join(t.TempDir(), "argv.txt")
+			wirePath := filepath.Join(t.TempDir(), "wire.log")
+			driver := newDriver(&fakePlugin{binary: os.Args[0]}, nil)
+			conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
+				SessionID: "qoder-model", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
+				Model: model, Effort: "auto", Env: map[string]string{
+					"QODER_ACP_FAKE": "1", "QODER_ACP_ARGV": argvPath,
+					"QODER_ACP_WIRE_LOG": wirePath, "QODER_ACP_MODELS": "1",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			t.Cleanup(func() {
+				if stopper, ok := conv.(interface{ Terminate() error }); ok {
+					_ = stopper.Terminate()
+				}
+			})
+			argv, err := os.ReadFile(argvPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(argv), "--model\n"+model+"\n") {
+				t.Fatalf("argv = %s", argv)
+			}
+			if wireContains(t, wirePath, "session/set_model") {
+				t.Fatal("launch model sent to ACP model setter")
+			}
+		})
 	}
 }
 
@@ -458,6 +529,11 @@ func runFakeStdio() {
 			}
 		case "session/new", "session/load", "session/resume":
 			result = map[string]any{"sessionId": "qoder-session-1"}
+			if os.Getenv("QODER_ACP_MODELS") == "1" {
+				result = map[string]any{"sessionId": "qoder-session-1", "models": map[string]any{
+					"currentModelId": "other", "availableModels": []any{map[string]any{"modelId": "other", "name": "Other"}},
+				}}
+			}
 		case "session/set_mode", "session/set_config_option":
 			result = map[string]any{}
 		case "_session/steering":

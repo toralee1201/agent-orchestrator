@@ -491,6 +491,11 @@ func (d *Driver) openNewSession(
 		return fmt.Errorf("configure ACP session: %w", err)
 	}
 	settingsStarted := time.Now()
+	// Qoder selects its launch model through --model; its ACP model catalog
+	// does not necessarily contain the CLI model ids (including Auto).
+	if d.cfg.Harness == domain.HarnessQoder {
+		settings.Model = ""
+	}
 	err = conv.applyTurnSettings(ctx, settings)
 	d.logStartStage(launchCfg.SessionID, "initial_settings", settingsStarted, err)
 	if err != nil {

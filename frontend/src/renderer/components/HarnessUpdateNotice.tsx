@@ -10,7 +10,7 @@ import { publishHarnessUpdateNoticeRect } from "../hooks/useHarnessUpdateNoticeC
 import { useLiveBrowserViewportRect, type ViewportRect } from "../hooks/useLiveBrowserViewportRect";
 import { useCenterPanelBox } from "../hooks/useCenterPanelBox";
 import { useSwipeToDismiss } from "../hooks/useSwipeToDismiss";
-import { AGENT_OPTIONS, agentLabel, type AgentId } from "../lib/agent-options";
+import { AGENT_OPTIONS, agentLabel, hasManagedInstallTarget, type AgentId } from "../lib/agent-options";
 import { aoBridge } from "../lib/bridge";
 import { cn } from "../lib/utils";
 import { useUiStore } from "../stores/ui-store";
@@ -162,7 +162,7 @@ export function HarnessUpdateNotice({ enabled }: { enabled: boolean }) {
 	if (!authPlans.data || !installers.data) return null;
 	// Let the first batch settle so a fast, seldom-used harness cannot jump
 	// ahead of the most-used one. Failed lookups don't block the other results.
-	if (AGENT_OPTIONS.some((id) => installed.has(id) && advisories.get(id)?.isPending)) return null;
+	if (AGENT_OPTIONS.some((id) => installed.has(id) && hasManagedInstallTarget(id) && advisories.get(id)?.isPending)) return null;
 	const readinessById = new Map(readiness.data?.agents.map((agent) => [agent.id, agent]));
 	// An update started here that failed stays explained until it is dismissed,
 	// even once a refresh reports the harness current: an updater can replace

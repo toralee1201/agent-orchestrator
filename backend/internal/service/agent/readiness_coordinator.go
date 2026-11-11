@@ -26,7 +26,10 @@ const (
 	hermesInstallCheckTimeout = 60 * time.Second
 	// The Hermes auth check resolves the binary, then runs `hermes status`,
 	// which inspects every provider and takes several seconds even when warm.
-	hermesAuthCheckTimeout     = 45 * time.Second
+	hermesAuthCheckTimeout = 45 * time.Second
+	// Qoder's auth check runs `qoder status --output json`. The adapter allows
+	// 30 seconds for a cold Node start; this ceiling leaves a little headroom.
+	qoderAuthCheckTimeout      = 35 * time.Second
 	opencodeV2MigrationTimeout = 30 * time.Minute
 	defaultAuthCheckTimeout    = 10 * time.Second
 	defaultReadinessWorkers    = 4
@@ -619,6 +622,8 @@ func (c *readinessCoordinator) checkAuthentication(item agentregistry.HarnessAge
 			timeout = opencodeV2MigrationTimeout
 		case domain.HarnessHermes:
 			timeout = hermesAuthCheckTimeout
+		case domain.HarnessQoder:
+			timeout = qoderAuthCheckTimeout
 		case domain.HarnessMiMoCode:
 			// Allow separate 20-second credential detection and verification budgets.
 			timeout = 40 * time.Second

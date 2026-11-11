@@ -14,6 +14,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/autohand"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/claudecode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/cline"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codebuddy"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codewhale"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codex"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/commandcode"
@@ -42,6 +43,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/openhands"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/pi"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/primeagent"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/qoder"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/qwen"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/unrealagent"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/vibe"
@@ -89,10 +91,12 @@ func Constructors() []adapters.Adapter {
 		fx.New(),
 		commandcode.New(),
 		hermes.New(),
+		qoder.New(),
 		unrealagent.New(),
 		mimocode.New(),
 		memcode.New(),
 		deepseekharness.New(),
+		codebuddy.New(),
 	}
 }
 

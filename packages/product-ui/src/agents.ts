@@ -39,10 +39,27 @@ export const AGENT_OPTIONS = [
 	"command-code",
 	"memcode",
 	"hermes",
+	"qoder",
+	"codebuddy",
 ] as const;
 
 export type AgentId = (typeof AGENT_OPTIONS)[number];
 export type AgentOption = AgentId;
+
+// Harnesses AO launches but does not install or update. A read-only version
+// advisory is still allowed when hasUpdateAdvisoryTarget returns true.
+export const AGENTS_WITHOUT_MANAGED_INSTALL: readonly AgentId[] = ["qoder"];
+
+export function hasManagedInstallTarget(agentId: AgentId): boolean {
+	return !AGENTS_WITHOUT_MANAGED_INSTALL.includes(agentId);
+}
+
+// Harnesses whose CLI exposes a bounded read-only release check.
+export const AGENTS_WITH_READ_ONLY_ADVISORY: readonly AgentId[] = ["qoder"];
+
+export function hasUpdateAdvisoryTarget(agentId: AgentId): boolean {
+	return hasManagedInstallTarget(agentId) || AGENTS_WITH_READ_ONLY_ADVISORY.includes(agentId);
+}
 
 export type AgentIdentity = Pick<AgentProfile, "id" | "label"> & {
 	logoKey?: string;
@@ -88,6 +105,8 @@ export const AGENT_LABELS: Record<AgentId, string> = {
 	"command-code": "Command Code",
 	memcode: "memcode",
 	"hermes": "Hermes Agent",
+	qoder: "Qoder",
+	codebuddy: "CodeBuddy",
 };
 
 export const AGENT_IDENTITIES: ReadonlyMap<AgentId, AgentIdentity> = new Map(

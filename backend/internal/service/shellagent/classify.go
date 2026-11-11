@@ -55,6 +55,10 @@ var executableHarness = map[string]domain.AgentHarness{
 	"command-code": domain.HarnessCommandCode,
 	"cmdc":         domain.HarnessCommandCode,
 	"hermes":       domain.HarnessHermes,
+	"qoder":        domain.HarnessQoder,
+	"qodercli":     domain.HarnessQoder,
+	"codebuddy":    domain.HarnessCodeBuddy,
+	"cbc":          domain.HarnessCodeBuddy,
 }
 
 // packageDirHarness names harnesses whose launcher runs a generic script from

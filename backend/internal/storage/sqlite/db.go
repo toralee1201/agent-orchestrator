@@ -2174,7 +2174,9 @@ func reconcileHarnessConstraint(db *sql.DB) error {
 	needsOpenHands := !strings.Contains(schema, "'openhands'")
 	needsMemcode := !strings.Contains(schema, "'memcode'")
 	needsCommandCode := !strings.Contains(schema, "'command-code'")
-	if !needsNativeAssistant && !needsMemcode && !needsMuse && !needsKimchi && !needsPrimeAgent && !needsOMP && !needsGemini && !needsUnreal && !needsCodewhale && !needsMiMo && !needsDeepSeek && !needsOpenHands && !needsCommandCode {
+	needsQoder := !strings.Contains(schema, "'qoder'")
+	needsCodebuddy := !strings.Contains(schema, "'codebuddy'")
+	if !needsNativeAssistant && !needsMemcode && !needsMuse && !needsKimchi && !needsPrimeAgent && !needsOMP && !needsGemini && !needsUnreal && !needsCodewhale && !needsMiMo && !needsDeepSeek && !needsOpenHands && !needsCommandCode && !needsQoder && !needsCodebuddy {
 		return nil
 	}
 	if _, err := db.Exec(`PRAGMA writable_schema = ON`); err != nil {
@@ -2301,6 +2303,12 @@ func reconcileHarnessConstraint(db *sql.DB) error {
 	if needsNativeAssistant {
 		repairs = append(repairs, replacement{"'fake'))", "'hermes', 'fake'))"})
 	}
+	if needsQoder {
+		repairs = append(repairs, replacement{"'fake'))", "'qoder', 'fake'))"})
+	}
+	if needsCodebuddy {
+		repairs = append(repairs, replacement{"'fake'))", "'codebuddy', 'fake'))"})
+	}
 	if needsMemcode {
 		repairs = append(repairs, replacement{"'fake'))", "'memcode', 'fake'))"})
 	}
@@ -2361,6 +2369,12 @@ WHERE type = 'table' AND name = 'sessions'`,
 	}
 	if !strings.Contains(schema, "'hermes'") {
 		return fmt.Errorf("schema repair: sessions harness constraint is missing hermes")
+	}
+	if !strings.Contains(schema, "'qoder'") {
+		return fmt.Errorf("schema repair: sessions harness constraint is missing qoder")
+	}
+	if !strings.Contains(schema, "'codebuddy'") {
+		return fmt.Errorf("schema repair: sessions harness constraint is missing codebuddy")
 	}
 	return nil
 }

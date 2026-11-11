@@ -29,6 +29,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/unrealagent"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/agyacp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/claudeacp"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/codebuddyacp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/codexappserver"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/commandcodeacp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/copilotacp"
@@ -42,6 +43,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/opencodeacp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/opencodev2acp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/piacp"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/qoderacp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/qwenacp"
 	unrealchat "github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/unrealagent"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -127,6 +129,8 @@ func Build(log *slog.Logger, onClaudeAuthRejected func()) *Registry {
 	add(agyacp.New(agyPlugin, log), agyPlugin)
 	hermesPlugin := hermes.New()
 	add(hermesacp.New(hermesPlugin, log), hermesPlugin)
+	add(qoderacp.New(log), nil)
+	add(codebuddyacp.New(log), nil)
 	return r
 }
 

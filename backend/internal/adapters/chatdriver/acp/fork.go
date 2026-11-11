@@ -37,8 +37,9 @@ func (d *Driver) ForkIntoHost(ctx context.Context, sourceID, lastTurnID string, 
 	}
 	launchCfg := LaunchConfig{
 		SessionID: cfg.SessionID, DataDir: cfg.DataDir, WorkspacePath: cfg.WorkspacePath,
-		Env: cfg.Env, Model: cfg.Model, Permissions: cfg.Permissions,
+		Env: cfg.Env, Model: cfg.Model, Effort: cfg.Effort, Permissions: cfg.Permissions,
 		SystemPrompt: cfg.SystemPrompt, ProviderScopeID: cfg.ProviderScopeID,
+		AdditionalDirectories: cfg.AdditionalDirectories,
 	}
 	conv, init, live, err := d.connect(ctx, launchCfg, cfg.PrepareEnv)
 	if err != nil {

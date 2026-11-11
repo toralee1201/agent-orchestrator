@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/autohand"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/claudecode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/cline"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/codebuddy"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/codex"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/copilot"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/crush"
@@ -28,6 +29,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/opencode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/opencodev2"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/pi"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/qoder"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
@@ -49,6 +51,7 @@ func Constructors() []Adapter {
 		autohand.New(),
 		claudecode.New(),
 		cline.New(),
+		codebuddy.New(),
 		codex.New(),
 		copilot.New(),
 		cursor.New(),
@@ -64,6 +67,7 @@ func Constructors() []Adapter {
 		opencode.New(),
 		opencodev2.New(),
 		pi.New(),
+		qoder.New(),
 	}
 }
 

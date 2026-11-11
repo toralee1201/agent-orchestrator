@@ -37,6 +37,7 @@ var agyBinarySpec = binaryutil.BinarySpec{
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "agy.cmd"}},
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "agy.exe"}},
 		{Base: binaryutil.WinHome, Parts: []string{".cargo", "bin", "agy.exe"}},
+		{Base: binaryutil.WinLocalAppData, Parts: []string{"agy", "bin", "agy.exe"}},
 	},
 }
 

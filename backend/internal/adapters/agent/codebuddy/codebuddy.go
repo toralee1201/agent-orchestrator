@@ -12,13 +12,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters"
+	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agentbase"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/binaryutil"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -249,7 +249,7 @@ func buildCommand(binary string, in commandInputs) ([]string, error) {
 
 // AppendGrantedDirectories appends `--add-dir` for each directory AO has
 // already granted. An empty list adds nothing.
-func AppendGrantedDirectories(cmd []string, directories []string) []string {
+func AppendGrantedDirectories(cmd, directories []string) []string {
 	for _, directory := range directories {
 		directory = strings.TrimSpace(directory)
 		if directory == "" {
@@ -323,7 +323,7 @@ func ReadVersion(ctx context.Context, path string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, path, "--version") //nolint:gosec // path is an adapter-resolved CodeBuddy binary
+	cmd := aoprocess.CommandContext(ctx, path, "--version")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("codebuddy: read version: %w", err)

@@ -166,7 +166,8 @@ func TestFakeStdioInitializeNewAndPrompt(t *testing.T) {
 
 	events := conv.Events()
 	go func() {
-		for range events {
+		// Drain events so the conversation keeps delivering while the turn runs.
+		for range events { //nolint:revive // empty body is the drain
 		}
 	}()
 	ref, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{Text: "hello"})
@@ -336,14 +337,14 @@ func runFakeStdio() {
 		default:
 			_ = writeJSON(out, map[string]any{
 				"jsonrpc": "2.0",
-				"id":      json.RawMessage(msg.ID),
+				"id":      msg.ID,
 				"error":   map[string]any{"code": -32601, "message": "method not found"},
 			})
 			continue
 		}
 		_ = writeJSON(out, map[string]any{
 			"jsonrpc": "2.0",
-			"id":      json.RawMessage(msg.ID),
+			"id":      msg.ID,
 			"result":  result,
 		})
 	}

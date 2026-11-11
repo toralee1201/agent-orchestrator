@@ -150,8 +150,8 @@ func TestGrantedDirectoriesAreOptIn(t *testing.T) {
 	if len(cmd) != 1 {
 		t.Fatalf("empty grant = %#v", cmd)
 	}
-	cmd = qoder.AppendGrantedDirectories(cmd, []string{"", " D:\\extra ", "E:\\other"})
-	want := []string{"qodercli", "--add-dir", "D:\\extra", "--add-dir", "E:\\other"}
+	cmd = qoder.AppendGrantedDirectories(cmd, []string{"", " D:\\extra ", "E:\\outside"})
+	want := []string{"qodercli", "--add-dir", "D:\\extra", "--add-dir", "E:\\outside"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("grant = %#v, want %#v", cmd, want)
 	}

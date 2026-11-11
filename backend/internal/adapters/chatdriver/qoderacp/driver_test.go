@@ -199,7 +199,7 @@ func TestFakeProcessStreamsFollowUpAndSteer(t *testing.T) {
 	deadline := time.Now().Add(8 * time.Second)
 	var sawText, sawTool, sawApproval bool
 	var approval ports.ChatEvent
-	for !(sawText && sawTool && sawApproval) {
+	for !sawText || !sawTool || !sawApproval {
 		if time.Now().After(deadline) {
 			t.Fatalf("events before prompt finished: text=%v tool=%v approval=%v", sawText, sawTool, sawApproval)
 		}
@@ -433,7 +433,7 @@ func runFakeStdio() {
 			note("prompt-result")
 			_ = writeJSON(out, map[string]any{
 				"jsonrpc": "2.0",
-				"id":      json.RawMessage(pendingPrompt),
+				"id":      pendingPrompt,
 				"result":  map[string]any{"stopReason": "end_turn"},
 			})
 			pendingPrompt = nil
@@ -519,14 +519,14 @@ func runFakeStdio() {
 		default:
 			_ = writeJSON(out, map[string]any{
 				"jsonrpc": "2.0",
-				"id":      json.RawMessage(msg.ID),
+				"id":      msg.ID,
 				"error":   map[string]any{"code": -32601, "message": "method not found"},
 			})
 			continue
 		}
 		_ = writeJSON(out, map[string]any{
 			"jsonrpc": "2.0",
-			"id":      json.RawMessage(msg.ID),
+			"id":      msg.ID,
 			"result":  result,
 		})
 	}

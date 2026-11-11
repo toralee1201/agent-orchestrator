@@ -51,7 +51,7 @@ user-authorized scope.
 
 `--needs-input` requests immediate non-interrupting delivery. `--stuck`
 requests immediate delivery plus a rate-limited interrupt. Informational work
-batches for up to one hour, while the first done report opens a fixed five
+batches for up to one hour, while the first done report opens a fixed one
 minute settlement window.
 
 **Examples:**

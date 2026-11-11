@@ -33,6 +33,13 @@ A fresh session is interactive `codebuddy` with no `--acp`, `--print`, or
 Worker, orchestrator, and reviewer are AO session roles. They are not passed as
 CodeBuddy `--agent` personas.
 
+## Auth
+
+AO does not write CodeBuddy's settings; sign in inside the CodeBuddy Code CLI.
+The account row reads only whether a gateway credential is present in
+`~/.codebuddy/settings.json` and never its value. No file, no gateway section,
+or an unreadable file stays unknown.
+
 ## Chat
 
 Chat mode is not enabled. The chat worker turns it on by registering a driver

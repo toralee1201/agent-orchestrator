@@ -14,6 +14,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/autohand"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/claudecode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/cline"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codebuddy"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codewhale"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codex"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/commandcode"
@@ -95,6 +96,7 @@ func Constructors() []adapters.Adapter {
 		mimocode.New(),
 		memcode.New(),
 		deepseekharness.New(),
+		codebuddy.New(),
 	}
 }
 

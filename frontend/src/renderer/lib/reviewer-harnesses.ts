@@ -17,6 +17,7 @@ const REVIEWER_HARNESS_IDS = [
 	"auggie",
 	"autohand",
 	"claude-code",
+	"codebuddy",
 	"codex",
 	"cline",
 	"copilot",

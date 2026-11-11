@@ -11,6 +11,7 @@ describe("configured harness authentication summary", () => {
 		["codewhale", undefined, undefined],
 		["memcode", undefined, undefined],
 		["qoder", undefined, undefined],
+		["codebuddy", undefined, undefined],
 		["unreal-agent", undefined, undefined],
 		["mimo-code", "credential_detection", "probe_timeout"],
 		["hermes", "provider_validation", "provider_accepted"],

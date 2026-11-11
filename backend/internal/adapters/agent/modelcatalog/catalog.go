@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/authprobe"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codebuddy"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/opencodev2"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/qoder"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -176,6 +177,14 @@ func Base(agentID string) ports.AgentModelCatalog {
 			})
 		}
 		return catalog(agentID, "official-catalog", entryMode, now, models...)
+	case "codebuddy":
+		models := make([]ports.AgentModelInfo, 0, len(codebuddy.ModelIDs))
+		for _, id := range codebuddy.ModelIDs {
+			models = append(models, ports.AgentModelInfo{
+				ID: id, Label: id, Efforts: append([]string(nil), codebuddy.EffortLevels...),
+			})
+		}
+		return catalog(agentID, "official-catalog", entryMode, now, models...)
 	case "memcode":
 		// Memcode v0.38.1 embeds these pinnable labels in models.json. The
 		// interactive /model picker accepts the labels, not the provider IDs.
@@ -246,7 +255,7 @@ func Manual(agentID string) ports.AgentModelCatalog {
 func customModelEntryMode(agentID string) ports.CustomModelEntryMode {
 	switch agentID {
 	case "claude-code", "codex", "opencode", "opencode-v2", "grok", "cursor", "qwen", "gemini",
-		"kimi", "muse", "aider", "goose", "autohand", "fx", "unreal-agent", "codewhale", "mimo-code", "deepseek-harness", "openhands", "devin", "hermes", "qoder":
+		"kimi", "muse", "aider", "goose", "autohand", "fx", "unreal-agent", "codewhale", "mimo-code", "deepseek-harness", "openhands", "devin", "hermes", "qoder", "codebuddy":
 		return ports.CustomModelEntryDirect
 	case "continue", "cline", "kilocode", "vibe", "pi", "kimchi", "prime-agent":
 		return ports.CustomModelEntryConfigured
@@ -301,7 +310,7 @@ func (d Discoverer) discover(ctx context.Context, request ports.AgentModelDiscov
 	if request.AgentID == "claude-code" {
 		return discoverClaudeCatalog(ctx, request, d.ClaudeModels)
 	}
-	if request.AgentID == "muse" || request.AgentID == "memcode" || request.AgentID == "qoder" {
+	if request.AgentID == "muse" || request.AgentID == "memcode" || request.AgentID == "qoder" || request.AgentID == "codebuddy" {
 		return Base(request.AgentID), nil
 	}
 	if request.AgentID == "codex" {

@@ -664,6 +664,7 @@ func TestCustomModelEntryPolicy(t *testing.T) {
 		{agent: "fx", wantEntryMode: "direct", wantSelection: ports.ModelSelectionCatalog},
 		{agent: "hermes", wantEntryMode: "direct", wantSelection: ports.ModelSelectionCatalog},
 		{agent: "qoder", wantEntryMode: "direct", wantSelection: ports.ModelSelectionCatalog},
+		{agent: "codebuddy", wantEntryMode: "direct", wantSelection: ports.ModelSelectionCatalog},
 	}
 
 	for _, tc := range tests {

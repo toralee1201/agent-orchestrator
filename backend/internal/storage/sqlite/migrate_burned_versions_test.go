@@ -257,6 +257,7 @@ var shippedMigrations = map[int64]string{
 	20261109072438921: "20261109072438921_terminal_titles.sql",
 	20261109120000000: "20261109120000000_conversation_turn_batch_delivery.sql",
 	20261110151108140: "20261110151108140_allow_qoder_harness.sql",
+	20261110143421861: "20261110143421861_allow_codebuddy_harness.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

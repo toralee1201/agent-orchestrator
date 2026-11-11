@@ -52,6 +52,7 @@ var agentDocumentationURLs = map[Target]string{
 	TargetCommandCode: "https://commandcode.ai/docs/quickstart",
 	TargetHermes:      "https://github.com/NousResearch/hermes-agent",
 	TargetQoder:       "https://qoder.com/",
+	TargetCodebuddy:   "https://www.codebuddy.ai/",
 }
 
 func (s requestPlanner) agentMethodPlans(target Target, operation AgentOperation) []Plan {
@@ -287,6 +288,8 @@ func (s requestPlanner) agentMethodPlans(target Target, operation AgentOperation
 		plans = []Plan{s.planNPM(target, "command-code")}
 	case TargetQoder:
 		plans = []Plan{{Target: target, Method: "manual", Unsupported: true, Reason: "Install Qoder so qoder is on PATH. The native Windows launcher is %USERPROFILE%\\.qoder\\bin\\qodercli\\qodercli.exe. AO only reads qoder update --check and does not run the updater."}}
+	case TargetCodebuddy:
+		plans = []Plan{{Target: target, Method: "manual", Unsupported: true, Reason: "Install CodeBuddy Code so codebuddy is on PATH. The native Windows launcher is %LOCALAPPDATA%\\codebuddy\\bin\\codebuddy.exe. An existing install updates with codebuddy update."}}
 	default:
 		plans = []Plan{{Target: target, Unsupported: true, Method: "manual", Reason: "unknown install target"}}
 	}
@@ -544,6 +547,7 @@ var vendorUpdateCommands = map[Target][]string{
 	TargetOpencode:   {"opencode", "upgrade", "--method", "curl"},
 	TargetGoose:      {"goose", "update"},
 	TargetHermes:     {"hermes", "update", "--yes"},
+	TargetCodebuddy:  {"codebuddy", "update"},
 	TargetKimchi:     {"kimchi", "update", "self", "--force"},
 	TargetOMP:        {"omp", "update"},
 	TargetAutohand:   {"autohand", "update"},

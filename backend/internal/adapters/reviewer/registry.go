@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/autohand"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/claudecode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/cline"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/codebuddy"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/codex"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/copilot"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer/crush"
@@ -50,6 +51,7 @@ func Constructors() []Adapter {
 		autohand.New(),
 		claudecode.New(),
 		cline.New(),
+		codebuddy.New(),
 		codex.New(),
 		copilot.New(),
 		cursor.New(),

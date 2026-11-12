@@ -1,150 +1,109 @@
-// Package agyacp binds Google Antigravity to AO's reusable ACP Chat transport.
+// Package agyacp binds the user's own Agy CLI to AO's reusable ACP Chat
+// transport.
 //
-// The agy CLI has no ACP mode. Google publishes a separate ACP server,
-// `agy_acp_server`, through the ACP registry (`antigravity-acp`). Like
-// Autohand's separately distributed `autohand-acp`, AO launches the user's own
-// installed copy, found beside the agy CLI or on PATH, and never downloads or
-// bundles it. Login, models, MCP configuration, and conversations stay the
-// user's own under GEMINI_HOME (default ~/.gemini).
+// Chat launches `agy acp` over stdio NDJSON and keeps that one process for the
+// session, the same shape as qoderacp and codebuddyacp. The ACP server ships
+// with the agy CLI; AO never downloads, bundles, or substitutes a separate
+// agy_acp_server. Login, models, MCP configuration, and conversations stay the
+// user's own, and AO never writes Gemini or Google credentials.
 package agyacp
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"runtime"
 	"strings"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agy"
 	acpdriver "github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/acp"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/nativeacp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
-// Plugin is the existing Agy agent-plugin surface the binding reuses: the agy
-// CLI's location, beside which the ACP server is usually installed, and the
-// canonical auth probe. The server itself is resolved separately because it is
-// not the agy CLI.
+// Plugin is the existing Agy agent-plugin surface the binding reuses for CLI
+// resolution and the canonical auth probe. The ACP server is the agy CLI itself.
 type Plugin interface {
 	ResolveBinary(context.Context) (string, error)
 	AuthStatus(context.Context) (ports.AgentAuthStatus, error)
 }
 
-// Antigravity's ACP mode ids, as advertised by agy_acp_server 1.3.0.
-const (
-	modeDefault  = "default"
-	modeAutoEdit = "auto_edit"
-	modeYolo     = "yolo"
-)
-
-// New constructs the Antigravity ACP Chat driver.
+// New constructs the Agy ACP Chat driver. It launches the resolved agy binary
+// as `agy acp`; there is no command override and no download. The plugin is
+// the existing agy adapter, so AuthStatus stays shared with the TUI worker.
 func New(plugin Plugin, log *slog.Logger) ports.ChatDriver {
-	var agyCLI func(context.Context) (string, error)
-	if plugin != nil {
-		agyCLI = plugin.ResolveBinary
+	if plugin == nil {
+		plugin = agy.New()
 	}
-	return acpdriver.New(buildConfig(plugin, newResolver(agyCLI), log), log)
+	return newDriver(plugin, log)
 }
 
-func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Config {
-	return acpdriver.Config{
-		Harness: domain.HarnessAgy,
-		Capabilities: ports.ChatCapabilities{
-			ports.ChatCapabilityStreaming: true,
-			ports.ChatCapabilityTools:     true,
-			// Antigravity raises session/request_permission for every gated tool.
-			ports.ChatCapabilityApprovals: true,
-			ports.ChatCapabilityInterrupt: true,
-			ports.ChatCapabilityResume:    true,
-		},
-		Probe: func(ctx context.Context) error {
-			if _, err := resolve.serverPath(ctx); err != nil {
-				return fmt.Errorf("%w: %w", ports.ErrChatDriverUnavailable, err)
-			}
-			if plugin != nil {
-				status, err := plugin.AuthStatus(ctx)
-				if err == nil && status == ports.AgentAuthStatusUnauthorized {
-					return ports.ErrChatAuthRequired
-				}
-				if err != nil && log != nil {
-					// The ACP handshake stays authoritative for an inconclusive probe.
-					log.Debug("agy auth probe inconclusive; continuing", "error", err)
-				}
-			}
-			return nil
-		},
-		Launch: func(ctx context.Context, cfg acpdriver.LaunchConfig) (acpdriver.Launch, error) {
-			server, err := resolve.serverPath(ctx)
-			if err != nil {
-				return acpdriver.Launch{}, fmt.Errorf("%w: %w", ports.ErrChatDriverUnavailable, err)
-			}
-			env := make(map[string]string, len(cfg.Env)+2)
-			for key, value := range cfg.Env {
-				env[key] = value
-			}
-			if env[harnessPathEnvVar] == "" {
-				if harness := resolve.harnessPath(server); harness != "" {
-					env[harnessPathEnvVar] = harness
-				}
-			}
-			if env[disableWorkspaceTrustEnvVar] == "" {
-				env[disableWorkspaceTrustEnvVar] = "1"
-			}
-			return acpdriver.Launch{Command: server, Args: launchArgs(runtime.GOOS), Env: env}, nil
-		},
-		ValidateInitialize: validateInitialize,
-		AfterInitialize:    newAuthBootstrap(agy.GeminiHome).run,
+func newDriver(plugin nativeacp.Plugin, log *slog.Logger) ports.ChatDriver {
+	return nativeacp.New(plugin, nativeacp.Config{
+		Harness:            domain.HarnessAgy,
+		Configure:          configure,
 		SessionMode:        sessionMode,
-		SessionOptions:     sessionOptions,
+		ValidateInitialize: validateInitialize,
 		SessionPreamble:    sessionPreamble,
-		// No PermissionPolicy: every request Antigravity raises is answered by
-		// the user. AO never selects allow_always for them, which would let a
-		// cached grant survive a later switch to a stricter approval mode.
-	}
+		Capabilities: ports.ChatCapabilities{
+			ports.ChatCapabilityApprovals: true,
+		},
+	}, log)
 }
 
-// launchArgs mirrors the registry entry's per-platform arguments. The Linux
-// build requires an explicit empty --uid flag.
-func launchArgs(goos string) []string {
-	if goos == "linux" {
-		return []string{"--uid="}
+// configure builds the `agy acp` argv using only flags `agy acp --help` lists.
+// The process cwd is set to the workspace by the ACP transport (see
+// acp/process.go), so there is no --cwd flag. --dangerously-skip-permissions is
+// the documented yolo flag; AO's auto and bypass tiers use it to match the old
+// yolo behavior. --add-dir grants additional roots. Model, system prompt, and
+// permission mode are NOT launch flags on the acp subcommand: model stays an
+// ACP session option only when advertised, and standing instructions go through
+// the session preamble below.
+func configure(_ context.Context, cfg acpdriver.LaunchConfig) ([]string, map[string]string, error) {
+	args := []string{"acp"}
+	if ports.NormalizePermissionMode(cfg.Permissions) == ports.PermissionModeAuto ||
+		ports.NormalizePermissionMode(cfg.Permissions) == ports.PermissionModeBypassPermissions {
+		args = append(args, "--dangerously-skip-permissions")
 	}
-	return nil
+	for _, dir := range cfg.AdditionalDirectories {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		args = append(args, "--add-dir", dir)
+	}
+	return args, nil, nil
 }
 
-// sessionMode maps AO's approval vocabulary onto Antigravity's mode ids.
-// Antigravity has no classifier mode between auto_edit (edits only) and yolo
-// (all tools). AO's auto means "run without asking", which is how the
-// orchestrator and long worker turns operate, so it selects yolo, like Goose's
-// auto. Default keeps every gated tool behind an approval.
+// sessionMode maps AO's approval vocabulary onto the mode ids `agy acp`
+// advertises in session/new (default, accept-edits, auto, plan). These are NOT
+// the old separate server's yolo/auto_edit ids. Bypass is handled by the
+// --dangerously-skip-permissions launch flag, so it returns "" and startup
+// skips session/set_mode rather than failing on an unoffered mode. Keeping
+// session/set_mode here lets a later AO approval change use the same ACP
+// vocabulary when the agent offers the mode.
 func sessionMode(permission ports.PermissionMode) string {
 	switch ports.NormalizePermissionMode(permission) {
 	case ports.PermissionModeDefault:
-		return modeDefault
+		return "default"
 	case ports.PermissionModeAcceptEdits:
-		return modeAutoEdit
-	case ports.PermissionModeAuto, ports.PermissionModeBypassPermissions:
-		return modeYolo
-	default:
+		return "accept-edits"
+	case ports.PermissionModeAuto:
+		return "auto"
+	case ports.PermissionModeBypassPermissions:
 		return ""
+	default:
+		return "default"
 	}
-}
-
-func sessionOptions(settings ports.ChatTurnSettings) []acpdriver.SessionOption {
-	if model := strings.TrimSpace(settings.Model); model != "" {
-		return []acpdriver.SessionOption{{ID: "model", Value: model}}
-	}
-	return nil
 }
 
 // sessionPreamble delivers AO's standing instructions as a text block ahead of
-// the first prompt. Antigravity accepts no system-prompt launch flag, and it
-// treats an embedded resource as something to look up (it web-searched the
-// resource URI in testing) rather than as instructions, so plain text is the
-// channel it follows. The instructions do not depend on any mode the user can
-// switch, so they survive approval changes.
+// the first prompt. `agy acp` has no system-prompt launch flag, and it treats an
+// embedded resource as something to look up rather than as instructions, so
+// plain text is the channel the CLI follows. The instructions do not depend on
+// any mode the user can switch, so they survive approval changes, and they stay
+// out of private credentials.
 func sessionPreamble(cfg acpdriver.LaunchConfig) []acpsdk.ContentBlock {
 	standing := strings.TrimSpace(cfg.SystemPrompt)
 	if standing == "" {

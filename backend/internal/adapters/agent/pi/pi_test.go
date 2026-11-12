@@ -3,6 +3,7 @@ package pi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -172,10 +173,10 @@ func TestGetLaunchCommandAppendsSystemPrompt(t *testing.T) {
 	}
 }
 
-func TestGetLaunchCommandPrefersInlineSystemPrompt(t *testing.T) {
+func TestGetLaunchCommandPrefersSystemPromptFile(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "system.md")
-	if err := os.WriteFile(file, []byte("file contents win"), 0o600); err != nil {
+	if err := os.WriteFile(file, []byte("file contents are never inlined"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -188,27 +189,103 @@ func TestGetLaunchCommandPrefersInlineSystemPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"pi", "--append-system-prompt", "inline wins"}
+	// The path is passed straight through to Pi, which reads the file itself.
+	// Neither the inline text nor the file contents belong in argv.
+	want := []string{"pi", "--append-system-prompt", file}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
 }
 
-func TestGetLaunchCommandSystemPromptFileReadError(t *testing.T) {
+func TestGetLaunchCommandSystemPromptFileIsNotRead(t *testing.T) {
 	p := &Plugin{resolvedBinary: "pi"}
-	_, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
-		SystemPromptFile: filepath.Join(t.TempDir(), "missing.md"),
+	// A path that does not exist is still passed through: the adapter never
+	// reads the file, so there is no read error to return.
+	missing := filepath.Join(t.TempDir(), "missing.md")
+	cmd, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		SystemPromptFile: missing,
 	})
-	if err == nil {
-		t.Fatal("expected error for unreadable system-prompt file, got nil")
+	if err != nil {
+		t.Fatalf("err = %v, want nil (file is not read)", err)
 	}
+	want := []string{"pi", "--append-system-prompt", missing}
+	if !reflect.DeepEqual(cmd, want) {
+		t.Fatalf("cmd = %#v, want %#v", cmd, want)
+	}
+}
+
+func TestSystemPromptFileKeepsLongContentsOutOfArgv(t *testing.T) {
+	// Regression for WINDOWS_COMMAND_LINE_TOO_LONG: the system prompt is large
+	// enough to exceed Windows' 32767 UTF-16 unit command-line limit if it were
+	// inlined. Only the (long) path may appear in argv -- never the contents or
+	// the inline fallback.
+	dir := t.TempDir()
+	// Build a long path from several valid components (each stays under the
+	// Windows per-component limit), so the argv holds a recognisably long path.
+	longDir := dir
+	for i := 0; i < 8; i++ {
+		longDir = filepath.Join(longDir, fmt.Sprintf("ao-prompt-directory-level-%02d", i))
+	}
+	if err := os.MkdirAll(longDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(longDir, "system-prompt.md")
+	contents := strings.Repeat("standing instruction line that is deliberately long ", 2000)
+	if len(contents) < 32767 {
+		t.Fatalf("test setup: contents are only %d bytes, want > 32767", len(contents))
+	}
+	if err := os.WriteFile(file, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inline := "inline system prompt that must not be used"
+
+	assertArgv := func(t *testing.T, label string, cmd []string) {
+		t.Helper()
+		joined := strings.Join(cmd, " ")
+		if !strings.Contains(joined, file) {
+			t.Fatalf("%s: argv %#v does not contain the system-prompt file path %q", label, cmd, file)
+		}
+		if strings.Contains(joined, contents) {
+			t.Fatalf("%s: argv contains the full system-prompt file contents", label)
+		}
+		if strings.Contains(joined, inline) {
+			t.Fatalf("%s: argv contains the inline system prompt", label)
+		}
+		if len(joined) >= 32767 {
+			t.Fatalf("%s: command line is %d bytes, want well under the 32767 UTF-16 unit Windows limit", label, len(joined))
+		}
+	}
+
+	p := &Plugin{resolvedBinary: "pi"}
+	launch, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		SystemPromptFile: file,
+		SystemPrompt:     inline,
+		Prompt:           "do the thing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertArgv(t, "launch", launch)
+
+	restore, ok, err := p.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		SystemPromptFile: file,
+		SystemPrompt:     inline,
+		Session: ports.SessionRef{
+			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "019e950e-52e0-7411-961b-d380ca7e610f"},
+		},
+	})
+	if err != nil || !ok {
+		t.Fatalf("restore = %#v, ok=%v err=%v", restore, ok, err)
+	}
+	assertArgv(t, "restore", restore)
 }
 
 func TestGetRestoreCommand(t *testing.T) {
 	p := &Plugin{resolvedBinary: "pi"}
+	file := filepath.Join(t.TempDir(), "system.md")
 	cmd, ok, err := p.GetRestoreCommand(context.Background(), ports.RestoreConfig{
-		SystemPrompt:     "restore inline wins",
-		SystemPromptFile: filepath.Join(t.TempDir(), "missing.md"),
+		SystemPrompt:     "inline fallback that is not used",
+		SystemPromptFile: file,
 		Session: ports.SessionRef{
 			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "019e950e-52e0-7411-961b-d380ca7e610f"},
 		},
@@ -221,7 +298,8 @@ func TestGetRestoreCommand(t *testing.T) {
 		t.Fatal("ok=false, want true")
 	}
 
-	want := []string{"pi", "--append-system-prompt", "restore inline wins", "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
+	// The system-prompt file path wins over inline text on restore too.
+	want := []string{"pi", "--append-system-prompt", file, "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}

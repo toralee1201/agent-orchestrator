@@ -1,0 +1,15 @@
+---
+title: AGY
+description: Built-in Terminal UI and native ACP Chat support for the user's AGY installation.
+---
+
+AO resolves your local `agy` executable and reuses its authentication.
+
+```bash
+ao agent ls --refresh
+ao spawn --project my-app --name agy-task --agent agy --mode chat
+```
+
+Chat launches your installed `agy` binary as `agy acp`, its native stdio ACP interface (`--stdio` is the default), and does not download `agy_acp_server`. Terminal UI remains the normal interactive `agy` CLI.
+
+AGY is also a shipped reviewer harness.

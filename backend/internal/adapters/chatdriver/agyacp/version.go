@@ -8,18 +8,20 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 )
 
-// serverAgentName is the agentInfo.name Google's Antigravity ACP server reports.
-const serverAgentName = "antigravity-acp"
+// serverAgentName is the agentInfo.name the `agy acp` CLI server reports. A live
+// initialize handshake against agy 1.5.5 returned "Antigravity ACP Server"; the
+// old separate agy_acp_server binary reported "antigravity-acp" and is no longer
+// required.
+const serverAgentName = "Antigravity ACP Server"
 
-// minimumServerVersion is the oldest server AO has verified end to end:
-// session/request_permission with allow_once, default/auto_edit/yolo modes,
-// session/load, and authenticate reusing an existing Google sign-in.
+// minimumServerVersion is the oldest `agy acp` server AO has verified. The CLI
+// reports its version in agentInfo.version, so the handshake is the gate.
 const minimumServerVersion = "1.3.0"
 
 var versionPattern = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)`)
 
-// validateInitialize admits only Google's Antigravity ACP server at a tested
-// version. The server has no --version flag, so the handshake is the gate.
+// validateInitialize admits only the ACP agent and version the live `agy acp`
+// handshake identifies.
 func validateInitialize(init acpsdk.InitializeResponse) error {
 	if init.AgentInfo == nil || init.AgentInfo.Name != serverAgentName {
 		name := ""

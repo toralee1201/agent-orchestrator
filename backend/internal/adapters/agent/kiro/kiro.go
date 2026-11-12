@@ -186,7 +186,9 @@ var kiroBinarySpec = binaryutil.BinarySpec{
 	NodeManaged:   true,
 	// The native Kiro installer location is probed before the npm shim, matching
 	// the pre-refactor order so a native install still wins when both are present.
+	// The Kiro CLI installer drops the binary in %LOCALAPPDATA%\Kiro-Cli.
 	WinPaths: []binaryutil.WinPath{
+		{Base: binaryutil.WinLocalAppData, Parts: []string{"Kiro-Cli", "kiro-cli.exe"}},
 		{Base: binaryutil.WinLocalAppData, Parts: []string{"Programs", "kiro", "kiro-cli.exe"}},
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "kiro-cli.cmd"}},
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "kiro-cli.exe"}},

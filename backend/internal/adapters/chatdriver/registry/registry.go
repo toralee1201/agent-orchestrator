@@ -39,6 +39,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/hermesacp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/kimchiacp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/kimiacp"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/kiroacp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/ompacp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/opencodeacp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/opencodev2acp"
@@ -131,6 +132,7 @@ func Build(log *slog.Logger, onClaudeAuthRejected func()) *Registry {
 	add(hermesacp.New(hermesPlugin, log), hermesPlugin)
 	add(qoderacp.New(log), nil)
 	add(codebuddyacp.New(log), nil)
+	add(kiroacp.New(log), nil)
 	return r
 }
 

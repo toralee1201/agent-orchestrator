@@ -1,0 +1,15 @@
+---
+title: Kiro
+description: Built-in Terminal UI and native ACP Chat support for the user's Kiro CLI installation.
+---
+
+AO resolves your local `kiro-cli` executable and reuses its authentication.
+
+```bash
+ao agent ls --refresh
+ao spawn --project my-app --name kiro-task --agent kiro --mode chat
+```
+
+Chat launches your installed `kiro-cli` binary as `kiro-cli acp`, its native stdio ACP interface, and keeps that one process for the session. AO does not download or bundle the CLI. Terminal UI remains the normal interactive `kiro-cli chat`.
+
+Kiro is also a shipped reviewer harness.

@@ -6354,7 +6354,8 @@ func systemPromptFileRequired(harness domain.AgentHarness) bool {
 		domain.HarnessOpenCode,
 		domain.HarnessCopilot,
 		domain.HarnessVibe,
-		domain.HarnessOpenHands:
+		domain.HarnessOpenHands,
+		domain.HarnessPi:
 		return true
 	default:
 		return false

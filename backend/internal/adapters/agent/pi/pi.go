@@ -8,9 +8,11 @@
 // relies on prompts not beginning with a literal "-".
 //
 // System prompts are appended to Pi's default coding-assistant prompt via
-// `--append-system-prompt <text>`. Pi's flag takes inline text only (no file
-// variant), so a system-prompt file is read from disk and its contents are
-// inlined into the flag; a read failure aborts the launch.
+// `--append-system-prompt <value>`. The value is either inline text or a path:
+// Pi resolves an existing path to its file contents. AO prefers the system-prompt
+// file path when one is available, keeping the (potentially very large) prompt
+// out of the command line -- Windows rejects command lines above 32767 UTF-16
+// units. Inline text is used only when no file was written.
 //
 // Permissions: Pi has no permission/approval CLI flags ("No permission popups" --
 // confirmation flows are built via TypeScript extensions), so AO emits no
@@ -30,7 +32,6 @@ package pi
 
 import (
 	"context"
-	"os"
 	"strings"
 	"sync"
 
@@ -108,14 +109,10 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 	cmd = []string{binary}
 	appendPiSessionDirFlag(&cmd, cfg.DataDir)
 	appendPiExtensionFlag(&cmd, cfg.WorkspacePath)
-	if cfg.SystemPrompt != "" {
+	if cfg.SystemPromptFile != "" {
+		cmd = append(cmd, "--append-system-prompt", cfg.SystemPromptFile)
+	} else if cfg.SystemPrompt != "" {
 		cmd = append(cmd, "--append-system-prompt", cfg.SystemPrompt)
-	} else if cfg.SystemPromptFile != "" {
-		data, err := os.ReadFile(cfg.SystemPromptFile) //nolint:gosec // path is AO-owned launch config
-		if err != nil {
-			return nil, err
-		}
-		cmd = append(cmd, "--append-system-prompt", string(data))
 	}
 	appendModelFlag(&cmd, cfg.Config)
 	if cfg.Prompt != "" {
@@ -146,14 +143,10 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 		appendPiSessionDirFlag(&cmd, cfg.DataDir)
 	}
 	appendPiExtensionFlag(&cmd, cfg.Session.WorkspacePath)
-	if cfg.SystemPrompt != "" {
+	if cfg.SystemPromptFile != "" {
+		cmd = append(cmd, "--append-system-prompt", cfg.SystemPromptFile)
+	} else if cfg.SystemPrompt != "" {
 		cmd = append(cmd, "--append-system-prompt", cfg.SystemPrompt)
-	} else if cfg.SystemPromptFile != "" {
-		data, err := os.ReadFile(cfg.SystemPromptFile) //nolint:gosec // path is AO-owned launch config
-		if err != nil {
-			return nil, false, err
-		}
-		cmd = append(cmd, "--append-system-prompt", string(data))
 	}
 	appendModelFlag(&cmd, cfg.Config)
 	cmd = append(cmd, "--session", agentSessionID)

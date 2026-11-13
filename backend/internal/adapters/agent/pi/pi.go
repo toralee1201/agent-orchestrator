@@ -14,9 +14,13 @@
 // out of the command line -- Windows rejects command lines above 32767 UTF-16
 // units. Inline text is used only when no file was written.
 //
-// Permissions: Pi has no permission/approval CLI flags ("No permission popups" --
-// confirmation flows are built via TypeScript extensions), so AO emits no
-// permission flag and defers to Pi's own behavior.
+// Project trust: Pi asks whether to trust a project when the working folder
+// contains protected resources (including AO's managed extension under
+// workspace/.pi/extensions/). AO passes --approve on every launch and restore
+// to trust those project-local files for the process, overriding the
+// defaultProjectTrust=ask prompt. --approve is project trust, not a
+// tool-permission flag; Pi still has no per-tool approval flags, so AO emits
+// no permission flag.
 //
 // Restore: AO pins Pi sessions under its configured data directory and resumes
 // interactively by id with `--session <id>` (partial UUIDs accepted). The native
@@ -95,18 +99,19 @@ func (p *Plugin) GetConfigSpec(ctx context.Context) (ports.ConfigSpec, error) {
 
 // GetLaunchCommand builds the argv to start a new interactive Pi session:
 //
-//	pi --session-dir <ao data>/pi/sessions [--append-system-prompt <system prompt>] [--model <model>] [<prompt>]
+//	pi --approve --session-dir <ao data>/pi/sessions [--append-system-prompt <system prompt>] [--model <model>] [<prompt>]
 //
 // The prompt is delivered in-command as a trailing positional message. Pi does
 // not honor a `--` options terminator, so the prompt must not begin with "-".
-// Pi has no permission flags, so none are emitted.
+// --approve trusts project-local files for the process -- it is project trust,
+// not a tool-permission flag (Pi has no per-tool approval flags).
 func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (cmd []string, err error) {
 	binary, err := p.piBinary(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	cmd = []string{binary}
+	cmd = []string{binary, "--approve"}
 	appendPiSessionDirFlag(&cmd, cfg.DataDir)
 	appendPiExtensionFlag(&cmd, cfg.WorkspacePath)
 	if cfg.SystemPromptFile != "" {
@@ -138,7 +143,7 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	if err != nil {
 		return nil, false, err
 	}
-	cmd = []string{binary}
+	cmd = []string{binary, "--approve"}
 	if piTranscriptInManagedDir(cfg.Session.Metadata[ports.MetadataKeyNativeTranscriptPath], cfg.DataDir) {
 		appendPiSessionDirFlag(&cmd, cfg.DataDir)
 	}

@@ -71,7 +71,7 @@ func TestGetLaunchCommandWorkerWithPromptIsInteractive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"pi", "add a health check"}
+	want := []string{"pi", "--approve", "add a health check"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("unexpected command\nwant: %#v\n got: %#v", want, cmd)
 	}
@@ -88,7 +88,7 @@ func TestGetLaunchCommandAppendsConfiguredModelBeforePrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"pi", "--append-system-prompt", "follow repo rules", "--model", "openai/gpt-4o", "add a health check"}
+	want := []string{"pi", "--approve", "--append-system-prompt", "follow repo rules", "--model", "openai/gpt-4o", "add a health check"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -103,7 +103,7 @@ func TestGetLaunchCommandOmitsBlankConfiguredModel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"pi"}
+	want := []string{"pi", "--approve"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -120,15 +120,16 @@ func TestGetLaunchCommandOrchestratorAppendsSystemPromptInteractively(t *testing
 		t.Fatal(err)
 	}
 
-	want := []string{"pi", "--append-system-prompt", "coordinate work and avoid implementation", "plan the issue"}
+	want := []string{"pi", "--approve", "--append-system-prompt", "coordinate work and avoid implementation", "plan the issue"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("unexpected command\nwant: %#v\n got: %#v", want, cmd)
 	}
 }
 
 func TestGetLaunchCommandEmitsNoPermissionFlag(t *testing.T) {
-	// Pi has no permission CLI surface; every mode must produce the same argv
-	// and never emit a permission flag.
+	// Pi has no per-tool permission CLI surface; every mode must produce the
+	// same argv (which now includes the --approve project-trust flag) and never
+	// emit a permission flag.
 	modes := []ports.PermissionMode{
 		ports.PermissionModeDefault,
 		"",
@@ -144,7 +145,7 @@ func TestGetLaunchCommandEmitsNoPermissionFlag(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"pi"}
+			want := []string{"pi", "--approve"}
 			if !reflect.DeepEqual(cmd, want) {
 				t.Fatalf("cmd = %#v, want %#v", cmd, want)
 			}
@@ -167,7 +168,7 @@ func TestGetLaunchCommandAppendsSystemPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"pi", "--append-system-prompt", "follow repo rules", "do the thing"}
+	want := []string{"pi", "--approve", "--append-system-prompt", "follow repo rules", "do the thing"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -191,7 +192,7 @@ func TestGetLaunchCommandPrefersSystemPromptFile(t *testing.T) {
 
 	// The path is passed straight through to Pi, which reads the file itself.
 	// Neither the inline text nor the file contents belong in argv.
-	want := []string{"pi", "--append-system-prompt", file}
+	want := []string{"pi", "--approve", "--append-system-prompt", file}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -208,7 +209,7 @@ func TestGetLaunchCommandSystemPromptFileIsNotRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil (file is not read)", err)
 	}
-	want := []string{"pi", "--append-system-prompt", missing}
+	want := []string{"pi", "--approve", "--append-system-prompt", missing}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -299,7 +300,7 @@ func TestGetRestoreCommand(t *testing.T) {
 	}
 
 	// The system-prompt file path wins over inline text on restore too.
-	want := []string{"pi", "--append-system-prompt", file, "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
+	want := []string{"pi", "--approve", "--append-system-prompt", file, "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -321,7 +322,7 @@ func TestGetRestoreCommandAppendsConfiguredModelBeforeSession(t *testing.T) {
 		t.Fatal("ok=false, want true")
 	}
 
-	want := []string{"pi", "--append-system-prompt", "follow repo rules", "--model", "openai/gpt-4o", "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
+	want := []string{"pi", "--approve", "--append-system-prompt", "follow repo rules", "--model", "openai/gpt-4o", "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -341,7 +342,7 @@ func TestGetRestoreCommandReappendsSystemPromptInteractively(t *testing.T) {
 		t.Fatal("ok=false, want true")
 	}
 
-	want := []string{"pi", "--append-system-prompt", "coordinate work and avoid implementation", "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
+	want := []string{"pi", "--approve", "--append-system-prompt", "coordinate work and avoid implementation", "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -372,7 +373,7 @@ func TestGetLaunchCommandExplicitlyLoadsManagedExtension(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"pi", "--session-dir", filepath.Join(dataDir, "pi", "sessions"), "--extension", filepath.Join(workspace, ".pi", "extensions", "ao-activity.ts"), "fix the bug"}
+	want := []string{"pi", "--approve", "--session-dir", filepath.Join(dataDir, "pi", "sessions"), "--extension", filepath.Join(workspace, ".pi", "extensions", "ao-activity.ts"), "fix the bug"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -398,7 +399,7 @@ func TestGetRestoreCommandExplicitlyLoadsManagedExtension(t *testing.T) {
 	if !ok {
 		t.Fatal("ok=false, want true")
 	}
-	want := []string{"pi", "--session-dir", filepath.Join(dataDir, "pi", "sessions"), "--extension", filepath.Join(workspace, ".pi", "extensions", "ao-activity.ts"), "--session", "native-pi-1"}
+	want := []string{"pi", "--approve", "--session-dir", filepath.Join(dataDir, "pi", "sessions"), "--extension", filepath.Join(workspace, ".pi", "extensions", "ao-activity.ts"), "--session", "native-pi-1"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -418,7 +419,7 @@ func TestGetRestoreCommandKeepsLegacySessionDirectory(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("restore = %#v, ok=%v err=%v", cmd, ok, err)
 	}
-	want := []string{"pi", "--extension", filepath.Join(workspace, ".pi", "extensions", "ao-activity.ts"), "--session", "legacy-pi-1"}
+	want := []string{"pi", "--approve", "--extension", filepath.Join(workspace, ".pi", "extensions", "ao-activity.ts"), "--session", "legacy-pi-1"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -529,8 +530,42 @@ func TestRestorePreservesThinkingLevel(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("restore = %v, %v", ok, err)
 	}
-	want := []string{"pi", "--model", "anthropic/claude-sonnet-4", "--thinking", "high", "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
+	want := []string{"pi", "--approve", "--model", "anthropic/claude-sonnet-4", "--thinking", "high", "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("argv = %q, want %q", cmd, want)
+	}
+}
+
+func TestLaunchAndRestoreTrustWorkspaceByDefault(t *testing.T) {
+	// AO writes workspace/.pi/extensions/ao-activity.ts via GetAgentHooks. With
+	// Pi's defaultProjectTrust=ask, that protected resource makes every new Pi
+	// TUI prompt to trust the project. --approve (project trust, not a
+	// tool-permission flag) overrides the prompt for the process, so both fresh
+	// launches and restores must always include it.
+	p := &Plugin{resolvedBinary: "pi"}
+
+	launch, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{Prompt: "do the thing"})
+	if err != nil {
+		t.Fatalf("GetLaunchCommand err = %v", err)
+	}
+
+	restore, ok, err := p.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		Session: ports.SessionRef{Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "native-pi-1"}},
+	})
+	if err != nil || !ok {
+		t.Fatalf("GetRestoreCommand = %#v, ok=%v err=%v", restore, ok, err)
+	}
+
+	for name, argv := range map[string][]string{"launch": launch, "restore": restore} {
+		found := false
+		for _, arg := range argv {
+			if arg == "--approve" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%s argv %#v does not include --approve", name, argv)
+		}
 	}
 }

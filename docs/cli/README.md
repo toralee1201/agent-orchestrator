@@ -251,8 +251,10 @@ head must be reviewed again before retrying with a new SHA.
 
 PR actions are available through `ao pr merge` and
 `ao pr resolve-comments`. Review actions are available through `ao review ls`,
-`ao review trigger` (also `execute` and `restart`), `ao review cancel` (also
-`stop`), and `ao review submit`.
+`ao review tests-passed --sha <head>`, `ao review trigger` (also `execute` and
+`restart`), `ao review cancel` (also `stop`), and `ao review submit`. A trigger
+refuses a head with no recorded test pass. An approved submission writes the
+worker and reviewer done reports on the worker session.
 
 ## Configuration
 

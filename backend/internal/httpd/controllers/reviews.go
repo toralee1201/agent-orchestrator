@@ -115,6 +115,12 @@ func (c *ReviewsController) Register(r chi.Router) {
 	r.Post("/sessions/{sessionId}/reviews/restore", c.restore)
 	r.Post("/sessions/{sessionId}/reviews/switch", c.switchReviewer)
 	r.Post("/sessions/{sessionId}/reviews/submit", c.submit)
+	r.Post("/sessions/{sessionId}/reviews/test-pass", c.testPass)
+}
+
+// TestPassInput is the body of POST /api/v1/sessions/{sessionId}/reviews/test-pass.
+type TestPassInput struct {
+	SHA string `json:"sha" description:"PR head commit whose unit tests passed."`
 }
 
 func (c *ReviewsController) activity(w http.ResponseWriter, r *http.Request) {
@@ -387,6 +393,23 @@ func reviewerSurfacePayload(surface domain.ReviewerSurface) *domain.ReviewerSurf
 		return nil
 	}
 	return &surface
+}
+
+func (c *ReviewsController) testPass(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/reviews/test-pass")
+		return
+	}
+	var in TestPassInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_BODY", "Invalid request body", nil)
+		return
+	}
+	if err := c.Svc.RecordTestPass(r.Context(), sessionID(r), strings.TrimSpace(in.SHA)); err != nil {
+		writeReviewError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (c *ReviewsController) submit(w http.ResponseWriter, r *http.Request) {

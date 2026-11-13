@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
+	reportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/report"
 )
 
 type fakeStore struct {
@@ -30,6 +31,7 @@ type fakeStore struct {
 	updateCalls       int
 	activityUpdates   int
 	resolvedThreadIDs []string
+	testPasses        map[string]time.Time
 }
 
 type fakeNotificationSink struct {
@@ -83,12 +85,20 @@ func (f *fakeStore) GetReviewRun(_ context.Context, id string) (domain.ReviewRun
 	return domain.ReviewRun{}, false, nil
 }
 
+func (f *fakeStore) RecordReviewTestPass(_ context.Context, id domain.SessionID, sha string, at time.Time) error {
+	if f.testPasses == nil {
+		f.testPasses = map[string]time.Time{}
+	}
+	f.testPasses[string(id)+"\x00"+sha] = at
+	return nil
+}
+
 func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
 	enabled := true
 	if f.sessionAutoInjectReview != nil {
 		enabled = *f.sessionAutoInjectReview
 	}
-	return domain.SessionRecord{ID: id, AutoInjectReview: enabled}, true, nil
+	return domain.SessionRecord{ID: id, Kind: domain.KindWorker, AutoInjectReview: enabled}, true, nil
 }
 
 func (f *fakeStore) SetSessionAutoInjectReview(_ context.Context, _ domain.SessionID, autoInject bool, _ time.Time) (bool, error) {
@@ -298,6 +308,79 @@ func TestRequestRereviewRejectsUnknownReviewer(t *testing.T) {
 // AO never sends the worker a separate verdict message: the reviewer's posted
 // review reaches the worker through the SCM observer like any other review. A
 // submitted result is recorded and stays complete.
+type recordingReporter struct {
+	notes    []string
+	states   []domain.ReportState
+	sessions []domain.SessionID
+}
+
+func (r *recordingReporter) Create(_ context.Context, input reportsvc.CreateInput) (domain.ReportRecord, error) {
+	r.notes = append(r.notes, input.Note)
+	r.states = append(r.states, input.State)
+	r.sessions = append(r.sessions, input.SessionID)
+	return domain.ReportRecord{ID: "rpt", SessionID: input.SessionID, Note: input.Note, State: input.State}, nil
+}
+
+func TestRecordTestPassStoresWorkerHead(t *testing.T) {
+	st := &fakeStore{}
+	svc := New(nil, st)
+	if err := svc.RecordTestPass(context.Background(), "mer-1", " sha1 "); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.testPasses["mer-1\x00sha1"]; !ok {
+		t.Fatalf("passes = %#v, want the trimmed head", st.testPasses)
+	}
+	if err := svc.RecordTestPass(context.Background(), "", "sha1"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing worker err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestSubmitApprovedWritesWorkerAndReviewerReports(t *testing.T) {
+	st := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-1", SessionID: "mer-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunRunning},
+	}
+	reporter := &recordingReporter{}
+	svc := New(nil, st, WithApprovalReporter(reporter))
+
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictApproved, "looks good", "9"); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(reporter.notes) != 2 || !strings.HasPrefix(reporter.notes[0], "worker: ") || !strings.HasPrefix(reporter.notes[1], "reviewer: ") {
+		t.Fatalf("notes = %#v, want worker: and reviewer: done reports", reporter.notes)
+	}
+	if reporter.states[0] != domain.ReportDone || reporter.states[1] != domain.ReportDone || reporter.sessions[0] != "mer-1" || reporter.sessions[1] != "mer-1" {
+		t.Fatalf("reports = notes %#v states %#v sessions %#v, want done reports on the worker session", reporter.notes, reporter.states, reporter.sessions)
+	}
+	if !strings.Contains(reporter.notes[0], "https://github.com/o/r/pull/1") || !strings.Contains(reporter.notes[0], "sha1") {
+		t.Fatalf("worker note = %q, want PR and head", reporter.notes[0])
+	}
+
+	reporter.notes = nil
+	st.run.Status, st.run.Verdict = domain.ReviewRunComplete, domain.VerdictApproved
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictApproved, "looks good", "9"); err != nil {
+		t.Fatalf("resubmit: %v", err)
+	}
+	if len(reporter.notes) != 0 {
+		t.Fatalf("resubmit wrote reports again: %#v", reporter.notes)
+	}
+}
+
+func TestSubmitChangesRequestedWritesNoApprovalReports(t *testing.T) {
+	st := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-1", SessionID: "mer-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunRunning},
+	}
+	reporter := &recordingReporter{}
+	svc := New(nil, st, WithApprovalReporter(reporter))
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictChangesRequested, "fix the nil check", ""); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(reporter.notes) != 0 {
+		t.Fatalf("changes_requested wrote reports: %#v", reporter.notes)
+	}
+}
+
 func TestSubmitRecordsTheResultWithoutASeparateDelivery(t *testing.T) {
 	st := &fakeStore{
 		ok:  true,

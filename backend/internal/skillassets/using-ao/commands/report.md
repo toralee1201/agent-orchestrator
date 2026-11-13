@@ -49,11 +49,9 @@ user-authorized scope.
 
 `--pr-created` and `--pr-reviewed` accept complete GitHub PR or GitLab MR URLs.
 
-A native reviewer process has no `AO_SESSION_ID`. When `AO_SESSION_ID` is empty
-and `AO_REVIEW_WORKER_SESSION_ID` is set, `ao report --done --note` reports
-against that worker session and prefixes the stored note with `reviewer:` (when
-it is not already prefixed). On that path only `--done` is allowed; every other
-state or a free-form report is a usage error.
+A native reviewer does not run `ao report`. When a review submission is
+approved, the review service writes the `worker:` and `reviewer:` done reports
+on the worker session itself.
 
 `--needs-input` requests immediate non-interrupting delivery. `--stuck`
 requests immediate delivery plus a rate-limited interrupt. Informational work

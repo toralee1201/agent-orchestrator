@@ -3013,6 +3013,19 @@ func reviewOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/reviews/test-pass", id: "recordReviewTestPass", tag: "reviews",
+			summary:    "Record that unit tests passed for a worker PR head",
+			pathParams: []any{controllers.SessionIDParam{}},
+			reqBody:    controllers.TestPassInput{},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/reviews/submit", id: "submitReview", tag: "reviews",
 			summary:    "Record a reviewer's result for a worker's PR",
 			pathParams: []any{controllers.SessionIDParam{}},

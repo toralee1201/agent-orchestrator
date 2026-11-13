@@ -723,6 +723,43 @@ func TestReviewTriggerSurfacesAlreadyReviewedConflict(t *testing.T) {
 	}
 }
 
+func TestReviewTestsPassedPostsHead(t *testing.T) {
+	cfg := setReviewEnv(t)
+	t.Setenv("AO_SESSION_ID", "mer-1")
+	srv, capture := reviewServer(t, http.StatusNoContent, "")
+	writeRunFileFor(t, cfg, srv)
+
+	if _, errOut, err := executeCLI(t, aliveDeps(), "review", "tests-passed", "--sha", "abc123"); err != nil {
+		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+	}
+	if capture.method != http.MethodPost || capture.path != "/api/v1/sessions/mer-1/reviews/test-pass" {
+		t.Fatalf("request = %s %s", capture.method, capture.path)
+	}
+	if !strings.Contains(capture.body, `"sha":"abc123"`) {
+		t.Fatalf("body = %s", capture.body)
+	}
+}
+
+func TestReviewTestsPassedRequiresSessionAndSHA(t *testing.T) {
+	cfg := setReviewEnv(t)
+	srv, capture := reviewServer(t, http.StatusNoContent, "")
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, aliveDeps(), "review", "tests-passed", "--sha", "abc123")
+	if got := ExitCode(err); got != 2 || !strings.Contains(err.Error(), "AO_SESSION_ID") {
+		t.Fatalf("missing session: exit %d err %v, want usage", got, err)
+	}
+
+	t.Setenv("AO_SESSION_ID", "mer-1")
+	_, _, err = executeCLI(t, aliveDeps(), "review", "tests-passed")
+	if got := ExitCode(err); got != 2 || !strings.Contains(err.Error(), "--sha") {
+		t.Fatalf("missing sha: exit %d err %v, want usage", got, err)
+	}
+	if strings.Contains(capture.path, "/reviews/test-pass") {
+		t.Fatalf("usage errors must not record a test pass, got %s", capture.path)
+	}
+}
+
 func TestReviewListDefaultsToCallingSession(t *testing.T) {
 	cfg := setReviewEnv(t)
 	t.Setenv("AO_SESSION_ID", "mer-3")

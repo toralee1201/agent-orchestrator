@@ -811,6 +811,7 @@ func Run(buildVersion string) (retErr error) {
 			reportCoordinator.Wake()
 		}
 	}})
+	reviewSvc.SetApprovalReporter(reportSvc)
 	reportCoordinator = reportsvc.NewCoordinator(reportsvc.CoordinatorDeps{
 		Store:    store,
 		Delivery: reportSemanticDelivery{chat: chatSvc, sessions: reportSessions, store: store},

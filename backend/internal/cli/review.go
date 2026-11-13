@@ -157,6 +157,32 @@ func newReviewCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newReviewSubmitCommand(ctx))
 	cmd.AddCommand(newReviewCancelCommand(ctx))
 	cmd.AddCommand(newReviewTriggerCommand(ctx))
+	cmd.AddCommand(newReviewTestsPassedCommand(ctx))
+	return cmd
+}
+
+func newReviewTestsPassedCommand(ctx *commandContext) *cobra.Command {
+	var sha string
+	cmd := &cobra.Command{
+		Use:   "tests-passed",
+		Short: "Record that unit tests passed for this worker's PR head",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			sessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
+			if sessionID == "" {
+				return usageError{errors.New("usage: AO_SESSION_ID is required")}
+			}
+			sha = strings.TrimSpace(sha)
+			if sha == "" {
+				return usageError{errors.New("usage: --sha is required")}
+			}
+			path := "sessions/" + url.PathEscape(sessionID) + "/reviews/test-pass"
+			return ctx.postJSON(cmd.Context(), path, struct {
+				SHA string `json:"sha"`
+			}{SHA: sha}, nil)
+		},
+	}
+	cmd.Flags().StringVar(&sha, "sha", "", "PR head commit whose unit tests passed (required)")
 	return cmd
 }
 

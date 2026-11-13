@@ -98,21 +98,9 @@ func TestReviewTextsIncludesReviewBrief(t *testing.T) {
 	}
 }
 
-// When every submitted verdict is approved, the reviewer must report done to
-// the orchestrator (with worker id, PR, and head); a changes_requested verdict
-// must not produce that report.
-func TestReviewTextsApprovedReviewerReportStep(t *testing.T) {
-	spec := launchSpec()
-	prompt, _ := reviewTexts(spec)
-	for _, want := range []string{
-		"3. After `ao review submit`",
-		"Only when every verdict is `approved`",
-		"ao report --done --note",
-		"reviewer: approved worker session mer-1, PR https://github.com/o/r/pull/1, head sha1",
-		"Do not run `ao report --done` when any verdict is `changes_requested`",
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing %q:\n%s", want, prompt)
-		}
+func TestReviewTextsDoesNotAskTheReviewerToReport(t *testing.T) {
+	prompt, _ := reviewTexts(launchSpec())
+	if strings.Contains(prompt, "ao report") {
+		t.Fatalf("reviewer prompt must not ask the model to ao report:\n%s", prompt)
 	}
 }

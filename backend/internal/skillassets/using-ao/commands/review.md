@@ -148,11 +148,15 @@ again: the command exits 1 with `REVIEW_ALREADY_RUNNING` or
 `--rerun`. The trigger re-reads the PR from the provider first; if you
 just pushed and it still says already reviewed, wait a few seconds and retry. The same reviewer agent never runs twice on one head at the same time.
 
+Record the head's unit-test pass with `ao review tests-passed --sha <head>`
+before triggering. A trigger for a head with no recorded pass is refused.
+
 By default the command turns on the worker session's review auto-inject. The
 reviewer posts an inline GitHub comment for each change it requires, and Orchestrator
 forwards those comments to the worker like any other review comments. An
-approval adds no comments, so check the verdict with `ao review ls`. If a run
-shows `failed` or `cancelled`, trigger again; nothing else reports it.
+approval adds no comments. Orchestrator writes the worker and reviewer done
+reports itself; do not run `ao report --done` for that verdict. If a run
+shows `failed` or `cancelled`, trigger again.
 
 **Examples:**
 
@@ -169,4 +173,28 @@ ao review trigger mer-3 --agent codex --model gpt-5.5
 ```bash
 # Add a second opinion on the same commit while the first reviewer runs
 ao review trigger --agent claude-code --rerun
+```
+
+---
+
+### ao review tests-passed
+
+Record that unit tests passed for one PR head of the calling worker session.
+`AO_SESSION_ID` is required. `ao review trigger` refuses a head that has no record.
+
+**Syntax:**
+```
+ao review tests-passed --sha <head>
+```
+
+**Flags:**
+
+| Flag | Meaning | Default / Required |
+|---|---|---|
+| `--sha string` | PR head commit whose unit tests passed | Required |
+
+**Example:**
+
+```bash
+ao review tests-passed --sha abc123def
 ```

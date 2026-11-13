@@ -21757,6 +21757,8 @@ components:
           type: array
         trackerIntake:
           $ref: '#/components/schemas/TrackerIntakeConfig'
+        unitTestCommand:
+          type: string
         worker:
           $ref: '#/components/schemas/RoleOverride'
         workersRequestReview:

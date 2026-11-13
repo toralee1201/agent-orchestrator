@@ -12,6 +12,10 @@ import (
 // reviewer prompts. It is a character (rune) count, not a byte count.
 const MaxReviewBriefLength = 2000
 
+// MaxUnitTestCommandLength bounds the project's unit-test command. It is a
+// character (rune) count, not a byte count.
+const MaxUnitTestCommandLength = 2000
+
 // ProjectConfig is the typed per-project configuration — the SQLite twin of the
 // legacy agent-orchestrator.yaml `projects.<id>` block. It is persisted as one
 // JSON blob per project and resolved at spawn. Each field is typed and
@@ -100,6 +104,13 @@ type ProjectConfig struct {
 	// addition to the standing checklist; it never relaxes the rule that the
 	// reviewer does not modify the checkout. Bounded by MaxReviewBriefLength.
 	ReviewBrief string `json:"reviewBrief,omitempty"`
+
+	// UnitTestCommand is the shell command the daemon runs in a worker's
+	// worktree to prove the unit tests pass for a PR head. `ao review
+	// tests-passed` executes it and records the pass only on exit 0, so a
+	// trigger for a head whose tests failed is refused. Empty means the
+	// project has no unit-test gate, and recording a pass is refused.
+	UnitTestCommand string `json:"unitTestCommand,omitempty"`
 }
 
 // ContainerReapConfig is the project-level opt-out for #2652's Docker
@@ -291,6 +302,9 @@ func (c ProjectConfig) Validate() error {
 	}
 	if utf8.RuneCountInString(c.ReviewBrief) > MaxReviewBriefLength {
 		return fmt.Errorf("reviewBrief: must be at most %d characters", MaxReviewBriefLength)
+	}
+	if utf8.RuneCountInString(c.UnitTestCommand) > MaxUnitTestCommandLength {
+		return fmt.Errorf("unitTestCommand: must be at most %d characters", MaxUnitTestCommandLength)
 	}
 	return nil
 }

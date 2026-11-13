@@ -672,8 +672,6 @@ func TestTriggerSpawnsNewReviewerAndRecordsRunAfterLaunch(t *testing.T) {
 	}
 }
 
-// A re-notified (already live) reviewer must receive the current project brief
-// just like a freshly spawned reviewer.
 func TestTriggerRefusesHeadWithoutRecordedTestPass(t *testing.T) {
 	store := &fakeStore{enforceTestPass: true}
 	launcher := &fakeLauncher{handle: "review-mer-1"}
@@ -697,6 +695,8 @@ func TestTriggerRefusesHeadWithoutRecordedTestPass(t *testing.T) {
 	}
 }
 
+// A re-notified (already live) reviewer must receive the current project brief
+// just like a freshly spawned reviewer.
 func TestTriggerNotifyCarriesProjectReviewBrief(t *testing.T) {
 	store := &fakeStore{
 		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, ReviewerHandleID: "review-mer-1", AgentSessionID: "native-reviewer-1"},

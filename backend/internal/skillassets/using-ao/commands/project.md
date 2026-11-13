@@ -159,6 +159,7 @@ ao project set-config <id> [flags]
 | `--tracker-intake` | Opt this project into GitHub or GitLab issue intake; inert unless the daemon also has `AO_TRACKER_INTAKE=on` | Disabled |
 | `--tracker-repo string` | Provider-native issue repository (`owner/repo` or `group/subgroup/repo`); defaults to the Git origin | - |
 | `--review-brief string` | Review brief the orchestrator includes in native reviewer prompts | - |
+| `--unit-test-command string` | Shell command the daemon runs in the worker's worktree to prove unit tests pass before a review | - |
 | `--reviewer stringArray` | Reviewer harness for worker PRs (repeatable) | - |
 | `--worker-agent string` | Harness override for worker sessions | - |
 

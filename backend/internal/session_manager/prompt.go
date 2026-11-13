@@ -405,7 +405,7 @@ func workerNativeReviewPrompt(project promptProject, hasOrchestrator bool) strin
 	if project.WorkersRequestReview {
 		policy = `This project asks workers to request it:
 
-- Once your PR is pushed and the unit tests for this head pass, record that pass with ` + "`ao review tests-passed --sha <head>`" + `, then run ` + "`ao review trigger`" + `. Right after opening a new PR, pass its URL: ` + "`ao review trigger --pr <url>`" + `. A trigger without a recorded pass for that head is refused.
+- Once your PR is pushed, record the test pass with ` + "`ao review tests-passed --sha <head>`" + `, then run ` + "`ao review trigger`" + `. Right after opening a new PR, pass its URL: ` + "`ao review trigger --pr <url>`" + `. The daemon runs the project's unit-test command in your worktree and records the pass only when it exits 0, so a failing suite records nothing; fix it and rerun. A trigger without a recorded pass for that head is refused.
 - The reviewer's findings arrive in this session as PR review comments. Address each one, push, record ` + "`ao review tests-passed --sha <new-head>`" + `, and run ` + "`ao review trigger`" + ` again.
 - An approval adds no comments. Orchestrator writes the worker and reviewer done reports itself when the verdict is approved. Do not run ` + "`ao report --done`" + ` for that verdict. If ` + "`ao review ls`" + ` shows the run failed or was cancelled, run ` + "`ao review trigger`" + ` again. A ` + "`changes_requested`" + ` verdict still means fix the findings, push, record the new test pass, and run ` + "`ao review trigger`" + ` again.`
 	}

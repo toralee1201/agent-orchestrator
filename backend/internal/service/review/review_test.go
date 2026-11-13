@@ -435,6 +435,36 @@ func TestRecordTestPassRejectsOtherHead(t *testing.T) {
 	}
 }
 
+// A suite that exits 0 but leaves the worktree on a different commit must not
+// record a pass: the pass would claim the requested head was tested.
+func TestRecordTestPassRejectsHeadMovedByTheSuite(t *testing.T) {
+	worktree, head := initTestRepo(t)
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{
+			UnitTestCommand: "git commit --allow-empty -m moved",
+		}},
+	}
+
+	err := New(nil, st).RecordTestPass(context.Background(), "mer-1", head)
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid when the suite moves HEAD", err)
+	}
+	if len(st.testPasses) != 0 {
+		t.Fatalf("passes = %#v, want nothing recorded", st.testPasses)
+	}
+
+	// Confirm the case under test really happened: the run did move HEAD.
+	moved, revErr := exec.Command("git", "-C", worktree, "rev-parse", "HEAD").Output()
+	if revErr != nil {
+		t.Fatalf("rev-parse HEAD: %v", revErr)
+	}
+	if strings.TrimSpace(string(moved)) == head {
+		t.Fatal("test setup did not move the worktree HEAD")
+	}
+}
+
 // initTestRepo creates a committed repository and returns its path and HEAD.
 func initTestRepo(t *testing.T) (string, string) {
 	t.Helper()

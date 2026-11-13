@@ -44,13 +44,19 @@ func (s *Service) runUnitTests(ctx context.Context, workspacePath, command, sha 
 	// WaitDelay closes those pipes; that must not turn a passing run into a
 	// failure. Real exit errors and cancellation still fail.
 	if errors.Is(err, exec.ErrWaitDelay) && ctx.Err() == nil {
-		return nil
+		err = nil
 	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("%w: unit tests did not finish within %d minutes", ErrInvalid, domain.DefaultScriptStepTimeoutMinutes)
 	}
 	if err != nil {
 		return fmt.Errorf("%w: unit tests failed in %s: %s", ErrInvalid, workspacePath, unitTestFailureDetail(output.String(), secretEnv))
+	}
+	// The suite itself can move HEAD — a script that checks out a branch or
+	// commits its own output. Re-check after the run so the recorded pass can
+	// only ever describe the head that was actually tested.
+	if headErr := unitTestHeadMatches(ctx, workspacePath, sha); headErr != nil {
+		return fmt.Errorf("%w; the worktree HEAD changed while the unit tests ran", headErr)
 	}
 	return nil
 }

@@ -85,6 +85,76 @@ func TestReportModesAndBoundaries(t *testing.T) {
 	}
 }
 
+// The native reviewer process has no AO_SESSION_ID. With only
+// AO_REVIEW_WORKER_SESSION_ID set, `ao report --done --note` reports against
+// that worker session and prefixes the stored note with "reviewer:".
+func TestReportReviewWorkerFallback(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "")
+	t.Setenv("AO_REVIEW_WORKER_SESSION_ID", "worker-7")
+	tests := []struct {
+		name string
+		args []string
+		want reportAPIRequest
+	}{
+		{
+			name: "prefixes a plain note",
+			args: []string{"report", "--done", "--note", "approved PR https://github.com/o/r/pull/1, head sha1"},
+			want: reportAPIRequest{SessionID: "worker-7", State: "done", Note: "reviewer: approved PR https://github.com/o/r/pull/1, head sha1"},
+		},
+		{
+			name: "keeps an existing reviewer prefix",
+			args: []string{"report", "--done", "--note", "reviewer: approved worker session mer-1, PR https://github.com/o/r/pull/1, head sha1"},
+			want: reportAPIRequest{SessionID: "worker-7", State: "done", Note: "reviewer: approved worker session mer-1, PR https://github.com/o/r/pull/1, head sha1"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := setConfigEnv(t)
+			var got reportAPIRequest
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/reports" {
+					_ = json.NewDecoder(r.Body).Decode(&got)
+				}
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, `{"id":"rpt_1"}`)
+			}))
+			defer srv.Close()
+			writeRunFileFor(t, cfg, srv)
+			_, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, tc.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("request=%+v want=%+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The reviewer fallback rejects every report state other than --done, plus a
+// free-form report with no structured state.
+func TestReportReviewWorkerFallbackRejectsOtherStates(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "")
+	t.Setenv("AO_REVIEW_WORKER_SESSION_ID", "worker-7")
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"checkpoint", []string{"report", "--checkpoint", "--note", "x"}},
+		{"needs input", []string{"report", "--needs-input", "--note", "x"}},
+		{"stuck", []string{"report", "--stuck", "--note", "x"}},
+		{"free form", []string{"report", "hello"}},
+		{"output only", []string{"report", "--artifact", "ref"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := executeCLI(t, Deps{}, tc.args...)
+			if err == nil || ExitCode(err) != 2 {
+				t.Fatalf("err=%v exit=%d, want usage error (exit 2)", err, ExitCode(err))
+			}
+		})
+	}
+}
+
 func TestReportPreservesAPIEnvelopeAsRuntimeError(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "worker-1")
 	cfg := setConfigEnv(t)

@@ -40,9 +40,40 @@ Do these steps in order:
 
     printf '%%s' '{ "reviews": [ { "runId": "<run-id>", "verdict": "<approved|changes_requested>", "githubReviewId": "<id-from-step-1-or-empty>", "body": "<your full review markdown>" } ] }' | ao review submit --session %s --reviews -
 
-Only if step 1 genuinely fails on the provider for a PR, still include that run in step 2 with an empty githubReviewId so the result is recorded.`,
-		spec.WorkerID, queueText, spec.WorkerID)
+Only if step 1 genuinely fails on the provider for a PR, still include that run in step 2 with an empty githubReviewId so the result is recorded.
+%s
+%s`,
+		spec.WorkerID, queueText, spec.WorkerID, reviewBriefSection(spec.ReviewBrief), reviewApprovedReportStep(spec))
 	return prompt, systemPrompt
+}
+
+// reviewBriefSection renders the orchestrator review brief, or an empty string
+// when there is no brief. The brief supplements the standing checklist; it never
+// relaxes the rule that the reviewer does not modify the checkout.
+func reviewBriefSection(brief string) string {
+	if strings.TrimSpace(brief) == "" {
+		return ""
+	}
+	return fmt.Sprintf(`## Review brief from the orchestrator
+
+Apply this brief in addition to the standing review checklist:
+
+%s
+
+This brief never overrides the standing rule that you do not modify the checkout — review only. It does not authorize pushing commits, editing files, running project programs, or any other change to the checkout.`, brief)
+}
+
+// reviewApprovedReportStep tells the reviewer to report completion to the
+// orchestrator once every submitted verdict is approved. The reviewer process
+// has no AO_SESSION_ID, so it relies on the AO_REVIEW_WORKER_SESSION_ID
+// fallback in `ao report --done`.
+func reviewApprovedReportStep(spec LaunchSpec) string {
+	return fmt.Sprintf(`3. After `+"`ao review submit`"+`, check the verdict for every PR in the queue. Only when every verdict is `+"`approved`"+` (none is `+"`changes_requested`"+`), report the approved review to the orchestrator:
+
+    ao report --done --note "reviewer: approved worker session %s, PR %s, head %s"
+
+Do not run `+"`ao report --done`"+` when any verdict is `+"`changes_requested`"+`; the worker will address the findings. Include the worker session id, PR, and head commit in the note.`,
+		spec.WorkerID, spec.PRURL, spec.TargetSHA)
 }
 
 func reviewSystemPrompt() string {

@@ -625,7 +625,7 @@ func TestReviewerOperationsWaitForStartupRecovery(t *testing.T) {
 func TestTriggerSpawnsNewReviewerAndRecordsRunAfterLaunch(t *testing.T) {
 	store := &fakeStore{}
 	launcher := &fakeLauncher{handle: "review-mer-1"}
-	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{cfg: domain.ProjectConfig{Env: map[string]string{"PROJECT_TOKEN": "review-value"}}}, launcher)
+	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{cfg: domain.ProjectConfig{Env: map[string]string{"PROJECT_TOKEN": "review-value"}, ReviewBrief: "Focus on auth regressions"}}, launcher)
 
 	res, err := trigger(context.Background(), eng, "mer-1", "", domain.AgentConfig{})
 	if err != nil {
@@ -646,8 +646,33 @@ func TestTriggerSpawnsNewReviewerAndRecordsRunAfterLaunch(t *testing.T) {
 	if launcher.gotSpec.ProjectEnv["PROJECT_TOKEN"] != "review-value" {
 		t.Fatal("review launch did not receive current project environment")
 	}
+	if launcher.gotSpec.ReviewBrief != "Focus on auth regressions" {
+		t.Fatalf("review launch brief = %q, want %q", launcher.gotSpec.ReviewBrief, "Focus on auth regressions")
+	}
 	if len(store.runs) != 1 || store.review == nil || store.review.ReviewerHandleID != "review-mer-1" {
 		t.Fatalf("persisted review=%+v runs=%+v", store.review, store.runs)
+	}
+}
+
+// A re-notified (already live) reviewer must receive the current project brief
+// just like a freshly spawned reviewer.
+func TestTriggerNotifyCarriesProjectReviewBrief(t *testing.T) {
+	store := &fakeStore{
+		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, ReviewerHandleID: "review-mer-1", AgentSessionID: "native-reviewer-1"},
+		runs:   []domain.ReviewRun{{ID: "run-0", SessionID: "mer-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha0", Status: domain.ReviewRunComplete}},
+	}
+	launcher := &fakeLauncher{alive: true}
+	worker := liveWorker()
+	eng := newEngineForTest(store, fakeSessions{rec: worker, ok: true}, prAt("sha1"), fakeProjects{cfg: domain.ProjectConfig{ReviewBrief: "Check the migration"}}, launcher)
+
+	if _, err := trigger(context.Background(), eng, worker.ID, "", domain.AgentConfig{}); err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	if launcher.spawned || !launcher.notified {
+		t.Fatalf("expected a live reviewer to be notified: %+v", launcher)
+	}
+	if launcher.gotSpec.ReviewBrief != "Check the migration" {
+		t.Fatalf("notify spec brief = %q, want %q", launcher.gotSpec.ReviewBrief, "Check the migration")
 	}
 }
 

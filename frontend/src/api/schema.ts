@@ -7564,6 +7564,7 @@ export interface components {
             orchestratorRulesFile?: string;
             postCreate?: string[];
             preRemove?: string[];
+            reviewBrief?: string;
             reviewers?: components["schemas"]["DomainReviewerConfig"][];
             sessionPrefix?: string;
             symlinks?: string[];

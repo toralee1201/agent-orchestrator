@@ -21688,6 +21688,8 @@ components:
           items:
             type: string
           type: array
+        reviewBrief:
+          type: string
         reviewers:
           items:
             $ref: '#/components/schemas/DomainReviewerConfig'

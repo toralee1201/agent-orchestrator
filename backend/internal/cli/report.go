@@ -114,7 +114,22 @@ func (c *commandContext) report(ctx context.Context, args []string, o reportOpti
 
 	sessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
 	if sessionID == "" {
-		return usageError{errors.New("usage: AO_SESSION_ID is required")}
+		// A native reviewer process has no AO_SESSION_ID; it reports its
+		// approved review against the worker session it was launched for.
+		workerSessionID := strings.TrimSpace(os.Getenv("AO_REVIEW_WORKER_SESSION_ID"))
+		if workerSessionID == "" {
+			return usageError{errors.New("usage: AO_SESSION_ID is required")}
+		}
+		if selected != domain.ReportDone {
+			return usageError{errors.New("usage: a reviewer worker session may only report --done")}
+		}
+		if !strings.HasPrefix(o.note, "reviewer:") {
+			o.note = "reviewer: " + o.note
+		}
+		if utf8.RuneCountInString(o.note) > domain.MaxReportTextCharacters {
+			return usageError{errors.New("usage: report text must be at most 1000 characters")}
+		}
+		sessionID = workerSessionID
 	}
 	apiOutputs := make([]reportAPIOutput, len(outputs))
 	for i, output := range outputs {

@@ -620,6 +620,10 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 	queueRuns = append(queueRuns, created...)
 	queue := reviewQueue(queueRuns)
 	launchRun := queueRuns[0]
+	reviewBrief, err := e.projectReviewBrief(ctx, worker.ProjectID)
+	if err != nil {
+		return TriggerResult{}, failRuns(0, err)
+	}
 	launchAgentSessionID := reviewRow.AgentSessionID
 	if hasConfigOverride || selectedMode == domain.ReviewerInterfaceChat {
 		launchAgentSessionID = ""
@@ -676,6 +680,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		}
 		launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, launchAgentSessionID, launchID)
 		launchSpec.ProjectEnv = projectEnv
+		launchSpec.ReviewBrief = reviewBrief
 		launchSpec.InterfaceMode = selectedMode
 		launchSpec.DeferInitialMessage = deferInitialMessage
 		if selectedMode == domain.ReviewerInterfaceChat && !hasConfigOverride {
@@ -694,6 +699,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		}
 	} else {
 		launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, reviewRow.AgentSessionID, reviewRow.ReviewerLaunchID)
+		launchSpec.ReviewBrief = reviewBrief
 		launchSpec.InterfaceMode = selectedMode
 		if err := e.launcher.Notify(ctx, handleID, launchSpec); err != nil {
 			return TriggerResult{}, failRuns(0, fmt.Errorf("notify reviewer: %w", err))
@@ -749,6 +755,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		previousStopped = true
 		if deferInitialMessage {
 			launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, persistedAgentSessionID, reviewRow.ReviewerLaunchID)
+			launchSpec.ReviewBrief = reviewBrief
 			launchSpec.InterfaceMode = selectedMode
 			if err := e.launcher.Notify(ctx, handleID, launchSpec); err != nil {
 				return TriggerResult{}, rollbackReplacement(fmt.Errorf("notify replacement reviewer: %w", err))
@@ -1989,6 +1996,19 @@ func (e *Engine) projectEnv(ctx stdctx.Context, id domain.ProjectID) (map[string
 		return nil, err
 	}
 	return project.Config.Env, nil
+}
+
+// projectReviewBrief returns the project's orchestrator review brief, copied
+// onto every launch/notify spec so the reviewer prompt can include it.
+func (e *Engine) projectReviewBrief(ctx stdctx.Context, id domain.ProjectID) (string, error) {
+	if e.projects == nil {
+		return "", nil
+	}
+	project, ok, err := e.projects.GetProject(ctx, string(id))
+	if err != nil || !ok {
+		return "", err
+	}
+	return project.Config.ReviewBrief, nil
 }
 
 func (e *Engine) upsertReview(ctx stdctx.Context, worker domain.SessionRecord, harness domain.ReviewerHarness, handleID, agentSessionID, reviewerLaunchID string, activityState domain.ActivityState, now time.Time) (domain.Review, error) {

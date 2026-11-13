@@ -65,3 +65,54 @@ func TestReviewPromptRequiresInlineCommentsForRequiredChanges(t *testing.T) {
 		t.Fatalf("review prompt still makes inline comments optional:\n%s", prompt)
 	}
 }
+
+// The orchestrator review brief is included verbatim in the reviewer prompt,
+// supplements the standing checklist, never relaxes the no-modify rule, and is
+// omitted entirely when empty.
+func TestReviewTextsIncludesReviewBrief(t *testing.T) {
+	brief := "Prioritise auth and session regressions over style nits."
+	spec := launchSpec()
+	spec.ReviewBrief = brief
+
+	prompt, system := reviewTexts(spec)
+	for _, want := range []string{
+		"## Review brief from the orchestrator",
+		brief,
+		"in addition to the standing review checklist",
+		"never overrides the standing rule that you do not modify the checkout",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if !strings.Contains(system, "or otherwise modify the checkout — review only") {
+		t.Fatalf("system prompt must still forbid modifying the checkout:\n%s", system)
+	}
+
+	for _, empty := range []string{"", "   \n\t"} {
+		spec.ReviewBrief = empty
+		got, _ := reviewTexts(spec)
+		if strings.Contains(got, "## Review brief from the orchestrator") {
+			t.Fatalf("prompt must omit the brief section when brief is %q:\n%s", empty, got)
+		}
+	}
+}
+
+// When every submitted verdict is approved, the reviewer must report done to
+// the orchestrator (with worker id, PR, and head); a changes_requested verdict
+// must not produce that report.
+func TestReviewTextsApprovedReviewerReportStep(t *testing.T) {
+	spec := launchSpec()
+	prompt, _ := reviewTexts(spec)
+	for _, want := range []string{
+		"3. After `ao review submit`",
+		"Only when every verdict is `approved`",
+		"ao report --done --note",
+		"reviewer: approved worker session mer-1, PR https://github.com/o/r/pull/1, head sha1",
+		"Do not run `ao report --done` when any verdict is `changes_requested`",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}

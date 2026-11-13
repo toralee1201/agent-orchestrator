@@ -91,6 +91,10 @@ type LaunchSpec struct {
 	// prompt. The engine uses this while replacing a live reviewer so the old
 	// process can be stopped before the replacement receives executable work.
 	DeferInitialMessage bool
+
+	// ReviewBrief is the orchestrator-authored note copied from the project's
+	// reviewBrief config when a review is launched or re-notified.
+	ReviewBrief string
 }
 
 // LaunchResult is the terminal/runtime state created by a reviewer launch.

@@ -132,6 +132,7 @@ type projectConfig struct {
 	// of another field never silently turns it off.
 	WorkersRequestReview bool             `json:"workersRequestReview,omitempty"`
 	Reviewers            []reviewerConfig `json:"reviewers,omitempty"`
+	ReviewBrief          string           `json:"reviewBrief,omitempty"`
 }
 
 // setConfigRequest mirrors the daemon's SetConfigInput body for
@@ -152,6 +153,7 @@ type projectSetConfigOptions struct {
 	agentRulesFile        string
 	orchestratorRules     string
 	orchestratorRulesFile string
+	reviewBrief           string
 	env                   []string
 	symlink               []string
 	postCreate            []string
@@ -352,6 +354,7 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&opts.agentRulesFile, "agent-rules-file", "", "Repo-relative file containing worker standing instructions")
 	f.StringVar(&opts.orchestratorRules, "orchestrator-rules", "", "Project-specific standing instructions for orchestrator sessions")
 	f.StringVar(&opts.orchestratorRulesFile, "orchestrator-rules-file", "", "Repo-relative file containing orchestrator standing instructions")
+	f.StringVar(&opts.reviewBrief, "review-brief", "", "Review brief the orchestrator includes in native reviewer prompts")
 	f.StringArrayVar(&opts.env, "env", nil, "Env var KEY=VALUE forwarded into sessions (repeatable)")
 	f.StringArrayVar(&opts.symlink, "symlink", nil, "Repo-relative path to symlink into workspaces (repeatable)")
 	f.StringArrayVar(&opts.postCreate, "post-create", nil, "Command to run after workspace creation (repeatable)")
@@ -372,6 +375,7 @@ var projectConfigFlags = []string{
 	"worker-agent", "orchestrator-agent", "agent-rules", "agent-rules-file",
 	"orchestrator-rules", "orchestrator-rules-file", "env", "symlink", "post-create",
 	"pre-remove", "tracker-intake", "tracker-repo", "tracker-assignee", "reviewer",
+	"review-brief",
 }
 
 // buildProjectConfig turns the set-config flags into the typed config sent to
@@ -418,6 +422,7 @@ func buildProjectConfig(opts projectSetConfigOptions, changed func(name string) 
 	setIfChanged("agent-rules-file", &cfg.AgentRulesFile, opts.agentRulesFile)
 	setIfChanged("orchestrator-rules", &cfg.OrchestratorRules, opts.orchestratorRules)
 	setIfChanged("orchestrator-rules-file", &cfg.OrchestratorRulesFile, opts.orchestratorRulesFile)
+	setIfChanged("review-brief", &cfg.ReviewBrief, opts.reviewBrief)
 	setIfChanged("tracker-repo", &cfg.TrackerIntake.Repo, opts.trackerRepo)
 	setIfChanged("tracker-assignee", &cfg.TrackerIntake.Assignee, opts.trackerAssignee)
 	if changed("tracker-intake") {

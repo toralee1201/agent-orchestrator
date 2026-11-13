@@ -5,7 +5,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 )
+
+// MaxReviewBriefLength bounds the orchestrator review brief copied into native
+// reviewer prompts. It is a character (rune) count, not a byte count.
+const MaxReviewBriefLength = 2000
 
 // ProjectConfig is the typed per-project configuration — the SQLite twin of the
 // legacy agent-orchestrator.yaml `projects.<id>` block. It is persisted as one
@@ -89,6 +94,12 @@ type ProjectConfig struct {
 	// the feature but check with the user or orchestrator before using it.
 	// Read at spawn, when the worker prompt is built.
 	WorkersRequestReview bool `json:"workersRequestReview,omitempty"`
+
+	// ReviewBrief is an orchestrator-authored note copied into native reviewer
+	// prompts when a review is launched or re-notified. Reviewers apply it in
+	// addition to the standing checklist; it never relaxes the rule that the
+	// reviewer does not modify the checkout. Bounded by MaxReviewBriefLength.
+	ReviewBrief string `json:"reviewBrief,omitempty"`
 }
 
 // ContainerReapConfig is the project-level opt-out for #2652's Docker
@@ -277,6 +288,9 @@ func (c ProjectConfig) Validate() error {
 	}
 	if err := c.TrackerIntake.Validate(); err != nil {
 		return err
+	}
+	if utf8.RuneCountInString(c.ReviewBrief) > MaxReviewBriefLength {
+		return fmt.Errorf("reviewBrief: must be at most %d characters", MaxReviewBriefLength)
 	}
 	return nil
 }

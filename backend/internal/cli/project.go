@@ -133,6 +133,7 @@ type projectConfig struct {
 	WorkersRequestReview bool             `json:"workersRequestReview,omitempty"`
 	Reviewers            []reviewerConfig `json:"reviewers,omitempty"`
 	ReviewBrief          string           `json:"reviewBrief,omitempty"`
+	UnitTestCommand      string           `json:"unitTestCommand,omitempty"`
 }
 
 // setConfigRequest mirrors the daemon's SetConfigInput body for
@@ -154,6 +155,7 @@ type projectSetConfigOptions struct {
 	orchestratorRules     string
 	orchestratorRulesFile string
 	reviewBrief           string
+	unitTestCommand       string
 	env                   []string
 	symlink               []string
 	postCreate            []string
@@ -355,6 +357,7 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&opts.orchestratorRules, "orchestrator-rules", "", "Project-specific standing instructions for orchestrator sessions")
 	f.StringVar(&opts.orchestratorRulesFile, "orchestrator-rules-file", "", "Repo-relative file containing orchestrator standing instructions")
 	f.StringVar(&opts.reviewBrief, "review-brief", "", "Review brief the orchestrator includes in native reviewer prompts")
+	f.StringVar(&opts.unitTestCommand, "unit-test-command", "", "Shell command the daemon runs to prove unit tests pass before a review")
 	f.StringArrayVar(&opts.env, "env", nil, "Env var KEY=VALUE forwarded into sessions (repeatable)")
 	f.StringArrayVar(&opts.symlink, "symlink", nil, "Repo-relative path to symlink into workspaces (repeatable)")
 	f.StringArrayVar(&opts.postCreate, "post-create", nil, "Command to run after workspace creation (repeatable)")
@@ -375,7 +378,7 @@ var projectConfigFlags = []string{
 	"worker-agent", "orchestrator-agent", "agent-rules", "agent-rules-file",
 	"orchestrator-rules", "orchestrator-rules-file", "env", "symlink", "post-create",
 	"pre-remove", "tracker-intake", "tracker-repo", "tracker-assignee", "reviewer",
-	"review-brief",
+	"review-brief", "unit-test-command",
 }
 
 // buildProjectConfig turns the set-config flags into the typed config sent to
@@ -423,6 +426,7 @@ func buildProjectConfig(opts projectSetConfigOptions, changed func(name string) 
 	setIfChanged("orchestrator-rules", &cfg.OrchestratorRules, opts.orchestratorRules)
 	setIfChanged("orchestrator-rules-file", &cfg.OrchestratorRulesFile, opts.orchestratorRulesFile)
 	setIfChanged("review-brief", &cfg.ReviewBrief, opts.reviewBrief)
+	setIfChanged("unit-test-command", &cfg.UnitTestCommand, opts.unitTestCommand)
 	setIfChanged("tracker-repo", &cfg.TrackerIntake.Repo, opts.trackerRepo)
 	setIfChanged("tracker-assignee", &cfg.TrackerIntake.Assignee, opts.trackerAssignee)
 	if changed("tracker-intake") {

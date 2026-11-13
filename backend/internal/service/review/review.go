@@ -126,6 +126,7 @@ type Store interface {
 	UpdateReviewActivity(ctx context.Context, id string, state domain.ActivityState, agentSessionID, launchID string) (bool, error)
 	GetReviewRun(ctx context.Context, id string) (domain.ReviewRun, bool, error)
 	GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
+	GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error)
 	SetSessionAutoInjectReview(ctx context.Context, id domain.SessionID, autoInject bool, updatedAt time.Time) (bool, error)
 	UpdateReviewRunResult(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error)
 	ListPRsBySession(ctx context.Context, id domain.SessionID) ([]domain.PullRequest, error)
@@ -922,8 +923,10 @@ func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, rev
 	return runs, nil
 }
 
-// RecordTestPass stores that the worker's unit tests passed for one PR head.
-// ao review trigger refuses a head that has no such record.
+// RecordTestPass runs the project's unit-test command in the worker's worktree
+// and records the pass for that head only when the command exits 0. The worker
+// no longer declares a pass: the daemon proves it. ao review trigger refuses a
+// head with no record, so a failed run leaves the head untriggerable.
 func (s *Service) RecordTestPass(ctx context.Context, workerID domain.SessionID, sha string) error {
 	sha = strings.TrimSpace(sha)
 	if workerID == "" || sha == "" || len(sha) > 128 {
@@ -941,6 +944,24 @@ func (s *Service) RecordTestPass(ctx context.Context, workerID domain.SessionID,
 	}
 	if session.Kind != domain.KindWorker {
 		return fmt.Errorf("%w: test pass can only be recorded for a worker session", ErrInvalid)
+	}
+	workspacePath := strings.TrimSpace(session.Metadata.WorkspacePath)
+	if workspacePath == "" {
+		return fmt.Errorf("%w: worker session %q has no workspace to run tests in", ErrInvalid, workerID)
+	}
+	project, ok, err := s.store.GetProject(ctx, string(session.ProjectID))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: project %q for worker %q", ErrNotFound, session.ProjectID, workerID)
+	}
+	command := strings.TrimSpace(project.Config.UnitTestCommand)
+	if command == "" {
+		return fmt.Errorf("%w: project %q has no unitTestCommand; set one with ao project set-config --unit-test-command", ErrInvalid, project.ID)
+	}
+	if err := s.runUnitTests(ctx, workspacePath, command, sha, project.Config.Env); err != nil {
+		return err
 	}
 	return s.store.RecordReviewTestPass(ctx, workerID, sha, s.clock())
 }

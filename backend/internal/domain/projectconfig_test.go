@@ -77,6 +77,8 @@ func TestProjectConfigValidate(t *testing.T) {
 		{"auto review disabled", ProjectConfig{AutoReview: false}, false},
 		{"review brief at limit", ProjectConfig{ReviewBrief: strings.Repeat("x", MaxReviewBriefLength)}, false},
 		{"review brief too long", ProjectConfig{ReviewBrief: strings.Repeat("x", MaxReviewBriefLength+1)}, true},
+		{"unit test command at limit", ProjectConfig{UnitTestCommand: strings.Repeat("x", MaxUnitTestCommandLength)}, false},
+		{"unit test command too long", ProjectConfig{UnitTestCommand: strings.Repeat("x", MaxUnitTestCommandLength+1)}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

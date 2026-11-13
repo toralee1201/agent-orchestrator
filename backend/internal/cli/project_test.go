@@ -177,6 +177,25 @@ func TestProjectSetConfigReviewBriefRoundTrip(t *testing.T) {
 	}
 }
 
+// TestProjectSetConfigUnitTestCommandRoundTrip checks --unit-test-command
+// updates only UnitTestCommand and survives the CLI config mirror round trip.
+func TestProjectSetConfigUnitTestCommandRoundTrip(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, capture := projectConfigServer(t, `{"status":"ok","project":{"id":"demo","config":`+storedProjectConfig+`}}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"project", "set-config", "demo", "--unit-test-command", "go test ./...")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+	}
+	want := decodeStoredProjectConfig(t)
+	want.UnitTestCommand = "go test ./..."
+	if got := putConfig(t, capture); !reflect.DeepEqual(got, want) {
+		t.Fatalf("PUT config = %+v\nwant %+v", got, want)
+	}
+}
+
 // TestProjectConfigMirrorsDomainJSONKeys fails when the CLI's hand-written
 // projectConfig drifts from domain.ProjectConfig. A key the CLI does not model
 // is silently dropped by every set-config round trip.

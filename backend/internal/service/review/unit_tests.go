@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/agentlaunch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
+	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 )
 
 // unitTestOutputLimit bounds the test output kept for the failure message so a
@@ -30,7 +31,7 @@ const unitTestOutputLimit = 8192
 // the commit under review, and the recorded pass would claim a tested commit
 // that was never actually tested. The snapshot also leaves the worker's
 // uncommitted files untouched.
-func (s *Service) runUnitTests(ctx context.Context, workspacePath, command, sha string, secretEnv map[string]string) (string, error) {
+func (s *Service) runUnitTests(ctx context.Context, project domain.ProjectRecord, workspacePath, command, sha string, secretEnv map[string]string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, domain.DefaultScriptStepTimeoutMinutes*time.Minute)
 	defer cancel()
 
@@ -45,11 +46,25 @@ func (s *Service) runUnitTests(ctx context.Context, workspacePath, command, sha 
 	if err := unitTestHeadMatches(ctx, workspacePath, commit); err != nil {
 		return "", err
 	}
-	snapshot, cleanup, err := unitTestSnapshot(ctx, workspacePath, commit)
+	root, err := s.unitTestRoot()
+	if err != nil {
+		return "", err
+	}
+	cleanAbandonedUnitTestSnapshots(root, time.Now())
+	snapshot, cleanup, err := unitTestSnapshot(ctx, workspacePath, root, commit)
 	if err != nil {
 		return "", err
 	}
 	defer cleanup()
+
+	// The snapshot is a pristine checkout, which by itself breaks any suite that
+	// needs installed dependencies or a shared .env: npm test in a fresh worktree
+	// has no node_modules. Prepare it exactly like a session workspace so the
+	// gate reflects whether the commit's suite passes in a ready workspace,
+	// rather than failing for lack of setup the worker's own workspace has.
+	if err := sessionmanager.ProvisionWorkspace(ctx, project, snapshot, nil); err != nil {
+		return "", fmt.Errorf("%w: cannot prepare the unit-test snapshot: %w", ErrInvalid, err)
+	}
 
 	output := &boundedOutput{}
 	cmd := unitTestShellCommand(ctx, command)
@@ -108,17 +123,20 @@ func resolveUnitTestCommit(ctx context.Context, workspacePath, sha string) (stri
 	return full, nil
 }
 
-// unitTestSnapshot checks out commit in a temporary detached worktree and
-// returns its path plus a cleanup that removes it. A worktree shares the
-// repository's object store, so the suite can still run git commands, while the
-// checkout itself is a pristine copy of exactly that commit.
-func unitTestSnapshot(ctx context.Context, workspacePath, commit string) (string, func(), error) {
-	root, err := os.MkdirTemp("", "ao-review-tests-")
+// unitTestSnapshot checks out commit in a temporary detached worktree under
+// root and returns its path plus a cleanup that removes it. A worktree shares
+// the repository's object store, so the suite can still run git commands, while
+// the checkout itself is a pristine copy of exactly that commit.
+func unitTestSnapshot(ctx context.Context, workspacePath, root, commit string) (string, func(), error) {
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		return "", nil, fmt.Errorf("%w: cannot create the snapshot root: %w", ErrInvalid, err)
+	}
+	dir, err := os.MkdirTemp(root, "run-")
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: cannot create a snapshot directory: %w", ErrInvalid, err)
 	}
-	snapshot := filepath.Join(root, "snapshot")
-	cleanup := func() { _ = os.RemoveAll(root) }
+	snapshot := filepath.Join(dir, "snapshot")
+	cleanup := func() { _ = os.RemoveAll(dir) }
 
 	add := aoprocess.CommandContext(ctx, "git", "-C", workspacePath, "worktree", "add", "--detach", snapshot, commit)
 	aoprocess.ConfigureTreeCancellation(add)
@@ -131,9 +149,50 @@ func unitTestSnapshot(ctx context.Context, workspacePath, commit string) (string
 		remove := aoprocess.CommandContext(context.WithoutCancel(ctx), "git", "-C", workspacePath, "worktree", "remove", "--force", snapshot)
 		remove.WaitDelay = time.Second
 		_ = remove.Run()
-		_ = os.RemoveAll(root)
+		_ = os.RemoveAll(dir)
 	}
 	return snapshot, cleanup, nil
+}
+
+// unitTestRoot is where snapshots live: under the daemon's data dir, so AO-owned
+// checkouts and any artifacts a suite leaves behind stay inside the state
+// boundary instead of the OS temp dir.
+func (s *Service) unitTestRoot() (string, error) {
+	dataDir := strings.TrimSpace(s.dataDir)
+	if dataDir == "" {
+		return "", fmt.Errorf("%w: the review service has no data directory for the unit-test snapshot", ErrInvalid)
+	}
+	return filepath.Join(dataDir, "review-tests"), nil
+}
+
+// unitTestSnapshotMaxAge bounds how long a snapshot directory may survive. A run
+// is capped by the unit-test timeout, so anything older cannot be in flight and
+// is left over from a run that was killed (daemon restart, power loss) before
+// its cleanup ran.
+var unitTestSnapshotMaxAge = domain.DefaultScriptStepTimeoutMinutes * time.Minute * 2
+
+// cleanAbandonedUnitTestSnapshots removes snapshot directories older than
+// unitTestSnapshotMaxAge. A killed run never reaches its cleanup, so nothing
+// else would ever remove the checkout it left behind. Best effort: a failure
+// here never blocks recording a pass. The directory is removed without a
+// `git worktree remove`, so the repository keeps a registration whose working
+// tree is gone; git reports that as prunable and it does not block a later
+// `git worktree add`.
+func cleanAbandonedUnitTestSnapshots(root string, now time.Time) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil || now.Sub(info.ModTime()) < unitTestSnapshotMaxAge {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(root, entry.Name()))
+	}
 }
 
 // unitTestHeadMatches checks the worktree is still on the head the worker asked

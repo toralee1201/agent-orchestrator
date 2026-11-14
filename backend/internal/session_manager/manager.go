@@ -6976,16 +6976,26 @@ func HookPATH(executable func() (string, error), getenv func(string) string, pro
 // post-create commands. Either failing aborts the spawn so a half-provisioned
 // workspace never launches an agent.
 func (m *Manager) provisionWorkspace(ctx context.Context, project domain.ProjectRecord, workspacePath string) error {
-	if err := applySymlinks(project.Path, workspacePath, project.Config.Symlinks); err != nil {
-		return err
-	}
 	var aoEnv map[string]string
 	if m.takeForkWorkspace(workspacePath) {
 		// Setup still runs for a fork: the original's lockfile may differ
 		// from what its cloned dependencies were installed from.
 		aoEnv = map[string]string{"AO_FORK": "1"}
 	}
-	return runPostCreate(ctx, workspacePath, project.Path, project.Config.PostCreate, project.Config.Env, aoEnv)
+	return ProvisionWorkspace(ctx, project, workspacePath, aoEnv)
+}
+
+// ProvisionWorkspace applies the project's per-workspace setup to a checkout
+// AO owns but did not create through a spawn: shared-file symlinks, then the
+// project's Setup steps. Callers outside the session manager use it to prepare
+// an isolated checkout that has to behave like a real session workspace — the
+// review unit-test snapshot, which would otherwise fail a normal suite such as
+// npm test for lack of node_modules even though the worker's workspace is ready.
+func ProvisionWorkspace(ctx context.Context, project domain.ProjectRecord, workspacePath string, extraEnv map[string]string) error {
+	if err := applySymlinks(project.Path, workspacePath, project.Config.Symlinks); err != nil {
+		return err
+	}
+	return runPostCreate(ctx, workspacePath, project.Path, project.Config.PostCreate, project.Config.Env, extraEnv)
 }
 
 // applySymlinks links each repo-relative path into the workspace. A source that

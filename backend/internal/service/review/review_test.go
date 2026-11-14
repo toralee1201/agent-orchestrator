@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -378,7 +379,7 @@ func TestRecordTestPassRunsProjectCommand(t *testing.T) {
 			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
 		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
 	}
-	svc := New(nil, st)
+	svc := New(nil, st, WithDataDir(t.TempDir()))
 
 	if err := svc.RecordTestPass(context.Background(), "mer-1", head); err != nil {
 		t.Fatalf("RecordTestPass: %v", err)
@@ -399,7 +400,7 @@ func TestRecordTestPassFailingCommandRecordsNothing(t *testing.T) {
 			UnitTestCommand: "git rev-parse --verify refs/heads/this-branch-does-not-exist",
 		}},
 	}
-	svc := New(nil, st)
+	svc := New(nil, st, WithDataDir(t.TempDir()))
 
 	err := svc.RecordTestPass(context.Background(), "mer-1", head)
 	if !errors.Is(err, ErrInvalid) {
@@ -452,7 +453,7 @@ func TestRecordTestPassStoresTheFullSHA(t *testing.T) {
 		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
 	}
 
-	if err := New(nil, st).RecordTestPass(context.Background(), "mer-1", head[:8]); err != nil {
+	if err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", head[:8]); err != nil {
 		t.Fatalf("RecordTestPass with a short sha: %v", err)
 	}
 	if _, ok := st.testPasses["mer-1\x00"+head]; !ok {
@@ -504,7 +505,7 @@ func TestRecordTestPassIgnoresUncommittedWorktreeChanges(t *testing.T) {
 		}},
 	}
 
-	if err := New(nil, st).RecordTestPass(context.Background(), "mer-1", head); err != nil {
+	if err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", head); err != nil {
 		t.Fatalf("RecordTestPass ran against the dirty worktree: %v", err)
 	}
 	// The worker's own uncommitted state must be left exactly as it was.
@@ -528,7 +529,7 @@ func TestRecordTestPassRejectsOtherHead(t *testing.T) {
 			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
 		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
 	}
-	err := New(nil, st).RecordTestPass(context.Background(), "mer-1", strings.Repeat("a", 40))
+	err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", strings.Repeat("a", 40))
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid for a foreign head", err)
 	}
@@ -553,7 +554,7 @@ func TestRecordTestPassRejectsHeadMovedByTheSuite(t *testing.T) {
 		}},
 	}
 
-	err := New(nil, st).RecordTestPass(context.Background(), "mer-1", "reviewed")
+	err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", "reviewed")
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid when the requested ref moves", err)
 	}
@@ -565,6 +566,108 @@ func TestRecordTestPassRejectsHeadMovedByTheSuite(t *testing.T) {
 	// commit the run started with.
 	if got := gitOutput(t, worktree, "rev-list", "--count", "reviewed"); got != "2" {
 		t.Fatalf("reviewed has %s commits, want the suite's extra commit", got)
+	}
+}
+
+// A suite that needs prepared dependencies must not be blocked just because the
+// snapshot is fresh: the snapshot is provisioned exactly like a session
+// workspace, with the project's shared-file symlinks and Setup steps, so npm
+// test finds the node_modules the worker's own workspace already has.
+func TestRecordTestPassPreparesTheSnapshotLikeAWorkspace(t *testing.T) {
+	worktree, head := initTestRepo(t)
+	if err := os.WriteFile(filepath.Join(worktree, "shared.env"), []byte("TOKEN=1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The suite needs both a shared file and an installed dependency.
+	setup := "mkdir -p deps && echo ready > deps/node_modules"
+	suite := "cat shared.env >/dev/null && cat deps/node_modules >/dev/null"
+	symlinks := []string{"shared.env"}
+	if runtime.GOOS == "windows" {
+		// Symlink creation needs a host privilege this unit test does not have,
+		// so only the Setup half is asserted there.
+		setup = `if not exist deps mkdir deps && echo ready> deps\node_modules`
+		suite = `type deps\node_modules >nul`
+		symlinks = nil
+	}
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Path: worktree, Config: domain.ProjectConfig{
+			UnitTestCommand: suite, Symlinks: symlinks, PostCreate: []string{setup},
+		}},
+	}
+
+	if err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", head); err != nil {
+		t.Fatalf("RecordTestPass: %v", err)
+	}
+	if _, ok := st.testPasses["mer-1\x00"+head]; !ok {
+		t.Fatalf("passes = %#v, want a pass recorded after the provisioned suite ran", st.testPasses)
+	}
+	// Setup ran in the snapshot, not the worker's worktree.
+	if _, statErr := os.Stat(filepath.Join(worktree, "deps")); !os.IsNotExist(statErr) {
+		t.Fatalf("Setup wrote into the worker's worktree: err=%v", statErr)
+	}
+}
+
+// Snapshot state belongs inside the AO state root, and a completed run must not
+// leave its checkout behind: both are what keeps AO state under ~/.ao.
+func TestUnitTestSnapshotsLiveUnderTheDataDirAndAreRemoved(t *testing.T) {
+	dataDir := t.TempDir()
+	worktree, head := initTestRepo(t)
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
+	}
+	svc := New(nil, st, WithDataDir(dataDir))
+	if root, err := svc.unitTestRoot(); err != nil || root != filepath.Join(dataDir, "review-tests") {
+		t.Fatalf("unitTestRoot() = %q, %v, want %q", root, err, filepath.Join(dataDir, "review-tests"))
+	}
+	if err := svc.RecordTestPass(context.Background(), "mer-1", head); err != nil {
+		t.Fatalf("RecordTestPass: %v", err)
+	}
+	leftovers, err := os.ReadDir(filepath.Join(dataDir, "review-tests"))
+	if err != nil {
+		t.Fatalf("snapshot root missing under the data dir: %v", err)
+	}
+	if len(leftovers) != 0 {
+		names := make([]string, 0, len(leftovers))
+		for _, entry := range leftovers {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("leftover snapshots after a completed run: %v", names)
+	}
+	// Without a data dir there is nowhere inside the state boundary to put it,
+	// so the gate refuses instead of falling back to the OS temp dir.
+	if _, err := New(nil, st).unitTestRoot(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unitTestRoot without a data dir = %v, want ErrInvalid", err)
+	}
+}
+
+// A run killed mid-suite never reaches its cleanup, so the next run has to
+// remove what it left behind while leaving in-flight snapshots alone.
+func TestCleanAbandonedUnitTestSnapshotsKeepsLiveRuns(t *testing.T) {
+	root := t.TempDir()
+	live := filepath.Join(root, "run-live")
+	dead := filepath.Join(root, "run-dead")
+	for _, dir := range []string{live, dead} {
+		if err := os.MkdirAll(filepath.Join(dir, "snapshot"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	stale := now.Add(-unitTestSnapshotMaxAge - time.Minute)
+	if err := os.Chtimes(dead, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanAbandonedUnitTestSnapshots(root, now)
+
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("in-flight snapshot removed: %v", err)
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Fatalf("abandoned snapshot kept: err=%v", err)
 	}
 }
 
@@ -668,6 +771,47 @@ func TestSubmitRetriesTheMissingApprovalReport(t *testing.T) {
 	}
 	if len(reporter.notes) != 0 {
 		t.Fatalf("second retry wrote %#v, want nothing", reporter.notes)
+	}
+}
+
+// The approval reports' dedupe key must identify the review run, not just the
+// PR and head. A second opinion or a rerun lands on the same PR URL and head,
+// and its completion still has to reach the orchestrator instead of matching
+// the earlier run's note and being skipped as already reported.
+func TestSubmitReportsEachRunOnTheSameHead(t *testing.T) {
+	runOnHead := func(id string) domain.ReviewRun {
+		return domain.ReviewRun{ID: id, SessionID: "mer-1", PRURL: "https://github.com/o/r/pull/1",
+			TargetSHA: "sha1", Status: domain.ReviewRunRunning}
+	}
+	st := &fakeStore{
+		ok:        true,
+		run:       runOnHead("run-1"),
+		batchRuns: []domain.ReviewRun{runOnHead("run-1"), runOnHead("run-2")},
+	}
+	reporter := &recordingReporter{}
+	svc := New(nil, st, WithApprovalReporter(reporter))
+
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictApproved, "looks good", "9"); err != nil {
+		t.Fatalf("first Submit: %v", err)
+	}
+	if len(reporter.notes) != 2 {
+		t.Fatalf("notes after the first run = %#v, want worker and reviewer reports", reporter.notes)
+	}
+	firstRunNotes := append([]string(nil), reporter.notes...)
+
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-2", domain.VerdictApproved, "looks good", "10"); err != nil {
+		t.Fatalf("second Submit on the same head: %v", err)
+	}
+	if len(reporter.notes) != 4 {
+		t.Fatalf("notes after the second run = %#v, want two more reports for its own run", reporter.notes)
+	}
+	for i, note := range reporter.notes[2:] {
+		if note == firstRunNotes[i] {
+			t.Fatalf("second run reused the first run's note: %q", note)
+		}
+		if !strings.Contains(note, "run run-2") {
+			t.Fatalf("second run note = %q, want it keyed to run run-2", note)
+		}
 	}
 }
 

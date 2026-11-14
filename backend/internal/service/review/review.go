@@ -99,6 +99,10 @@ type Service struct {
 	// its eighteen-method store. Defaulted in New; only tests replace it.
 	engineTrigger func(context.Context, domain.SessionID, reviewcore.TriggerOptions) (reviewcore.TriggerResult, error)
 	reports       approvalReporter
+	// dataDir is the daemon's state root. Unit-test snapshots live under it so
+	// AO-owned checkouts stay inside the state boundary instead of the OS temp
+	// directory.
+	dataDir string
 }
 
 // approvalReporter persists the done reports the review service writes when a
@@ -204,6 +208,11 @@ func (s *Service) SetApprovalReporter(r approvalReporter) {
 	if s != nil {
 		s.reports = r
 	}
+}
+
+// WithDataDir sets the daemon state root the unit-test snapshots live under.
+func WithDataDir(dir string) Option {
+	return func(s *Service) { s.dataDir = dir }
 }
 
 // WithClock overrides the service clock for tests.
@@ -978,7 +987,7 @@ func (s *Service) RecordTestPass(ctx context.Context, workerID domain.SessionID,
 	// The suite runs against a clean snapshot of the requested commit, and the
 	// pass is recorded for the full SHA it resolved to. A short SHA stored
 	// verbatim would never match the provider's full head SHA at trigger time.
-	testedSHA, err := s.runUnitTests(ctx, workspacePath, command, sha, project.Config.Env)
+	testedSHA, err := s.runUnitTests(ctx, project, workspacePath, command, sha, project.Config.Env)
 	if err != nil {
 		return err
 	}
@@ -1018,10 +1027,15 @@ func (s *Service) writeApprovalReports(ctx context.Context, workerID domain.Sess
 	return nil
 }
 
+// approvalDetail describes an approval in the report note. Each run's id leads
+// its entry because the note is also the report's dedupe key: a rerun or a
+// second opinion on the same head is a different run and must still produce its
+// own completion reports, while a retry of the same run must match the note it
+// already wrote. The id goes first so truncation cannot drop it.
 func approvalDetail(runs []domain.ReviewRun) string {
 	parts := make([]string, 0, len(runs))
 	for _, run := range runs {
-		parts = append(parts, fmt.Sprintf("PR %s head %s", run.PRURL, run.TargetSHA))
+		parts = append(parts, fmt.Sprintf("run %s: PR %s head %s", run.ID, run.PRURL, run.TargetSHA))
 	}
 	return strings.Join(parts, "; ")
 }

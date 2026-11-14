@@ -22,7 +22,7 @@ func TestEverySupportedHarnessHasAccountSetupMethod(t *testing.T) {
 	for _, harness := range domain.AllHarnesses {
 		methods := loginMethods(string(harness))
 		plan := planByAgentID[string(harness)]
-		if len(methods) == 0 && !(accountOnly[harness] && plan.LaunchMode == LaunchDocumentation) {
+		if len(methods) == 0 && (!accountOnly[harness] || plan.LaunchMode != LaunchDocumentation) {
 			t.Errorf("%s has no Account setup method", harness)
 		}
 		if accountOnly[harness] {

@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -334,13 +337,30 @@ type recordingReporter struct {
 	notes    []string
 	states   []domain.ReportState
 	sessions []domain.SessionID
+	// existing is what ListSessionReports returns, standing in for reports an
+	// earlier, interrupted attempt already persisted.
+	existing []domain.ReportRecord
+	// failAfter, when positive, fails Create once that many reports have been
+	// written, standing in for a write that is interrupted partway through.
+	failAfter int
+	created   int
 }
 
 func (r *recordingReporter) Create(_ context.Context, input reportsvc.CreateInput) (domain.ReportRecord, error) {
+	if r.failAfter > 0 && r.created >= r.failAfter {
+		return domain.ReportRecord{}, errors.New("report write failed")
+	}
+	r.created++
 	r.notes = append(r.notes, input.Note)
 	r.states = append(r.states, input.State)
 	r.sessions = append(r.sessions, input.SessionID)
-	return domain.ReportRecord{ID: "rpt", SessionID: input.SessionID, Note: input.Note, State: input.State}, nil
+	rec := domain.ReportRecord{ID: "rpt", SessionID: input.SessionID, Note: input.Note, State: input.State}
+	r.existing = append(r.existing, rec)
+	return rec, nil
+}
+
+func (r *recordingReporter) ListSessionReports(_ context.Context, _ domain.SessionID) ([]domain.ReportRecord, error) {
+	return append([]domain.ReportRecord(nil), r.existing...), nil
 }
 
 func TestRecordTestPassRejectsMissingWorker(t *testing.T) {
@@ -359,7 +379,7 @@ func TestRecordTestPassRunsProjectCommand(t *testing.T) {
 			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
 		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
 	}
-	svc := New(nil, st)
+	svc := New(nil, st, WithDataDir(t.TempDir()))
 
 	if err := svc.RecordTestPass(context.Background(), "mer-1", head); err != nil {
 		t.Fatalf("RecordTestPass: %v", err)
@@ -380,7 +400,7 @@ func TestRecordTestPassFailingCommandRecordsNothing(t *testing.T) {
 			UnitTestCommand: "git rev-parse --verify refs/heads/this-branch-does-not-exist",
 		}},
 	}
-	svc := New(nil, st)
+	svc := New(nil, st, WithDataDir(t.TempDir()))
 
 	err := svc.RecordTestPass(context.Background(), "mer-1", head)
 	if !errors.Is(err, ErrInvalid) {
@@ -396,13 +416,18 @@ func TestRecordTestPassFailingCommandRecordsNothing(t *testing.T) {
 
 func TestRecordTestPassRequiresCommandAndWorkspace(t *testing.T) {
 	worktree, head := initTestRepo(t)
+	// A project with no unitTestCommand has no test gate, so recording a pass
+	// is a no-op instead of an error: reviews of it must stay triggerable.
 	noCommand := &fakeStore{
 		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
 			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
 		project: domain.ProjectRecord{ID: "proj-1"},
 	}
-	if err := New(nil, noCommand).RecordTestPass(context.Background(), "mer-1", head); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("no command err = %v, want ErrInvalid", err)
+	if err := New(nil, noCommand).RecordTestPass(context.Background(), "mer-1", head); err != nil {
+		t.Fatalf("no command err = %v, want nil (no gate configured)", err)
+	}
+	if len(noCommand.testPasses) != 0 {
+		t.Fatalf("passes = %#v, want nothing recorded without a command", noCommand.testPasses)
 	}
 
 	noWorkspace := &fakeStore{
@@ -412,8 +437,86 @@ func TestRecordTestPassRequiresCommandAndWorkspace(t *testing.T) {
 	if err := New(nil, noWorkspace).RecordTestPass(context.Background(), "mer-1", head); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("no workspace err = %v, want ErrInvalid", err)
 	}
-	if len(noCommand.testPasses)+len(noWorkspace.testPasses) != 0 {
+	if len(noWorkspace.testPasses) != 0 {
 		t.Fatal("no pass may be recorded when the gate cannot run")
+	}
+}
+
+// A short SHA is accepted, but the recorded pass names the full commit. The
+// trigger compares the provider's full head SHA, so a short value would never
+// match it and the head would stay untriggerable.
+func TestRecordTestPassStoresTheFullSHA(t *testing.T) {
+	worktree, head := initTestRepo(t)
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
+	}
+
+	if err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", head[:8]); err != nil {
+		t.Fatalf("RecordTestPass with a short sha: %v", err)
+	}
+	if _, ok := st.testPasses["mer-1\x00"+head]; !ok {
+		t.Fatalf("passes = %#v, want the full sha %s", st.testPasses, head)
+	}
+	for key := range st.testPasses {
+		if strings.HasSuffix(key, "\x00"+head[:8]) {
+			t.Fatalf("passes = %#v, want no short sha recorded", st.testPasses)
+		}
+	}
+}
+
+// The suite must see exactly the commit under review. Modified, staged, and
+// untracked files in the worker's worktree would otherwise let a suite pass on
+// content the reviewer never sees.
+func TestRecordTestPassIgnoresUncommittedWorktreeChanges(t *testing.T) {
+	worktree, _ := initTestRepo(t)
+	marker := filepath.Join(worktree, "marker.txt")
+	if err := os.WriteFile(marker, []byte("clean"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOutput(t, worktree, "add", "marker.txt")
+	gitOutput(t, worktree, "commit", "-m", "add marker")
+	head := gitOutput(t, worktree, "rev-parse", "HEAD")
+
+	// Dirty the worktree all three ways: a modified tracked file, staged
+	// content, and an untracked file.
+	if err := os.WriteFile(marker, []byte("dirty"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOutput(t, worktree, "add", "marker.txt")
+	untracked := filepath.Join(worktree, "untracked.txt")
+	if err := os.WriteFile(untracked, []byte("dirty"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Prove the worktree really is dirty, so a pass recorded below can only mean
+	// the suite ran somewhere clean.
+	if out := gitOutput(t, worktree, "status", "--porcelain"); out == "" {
+		t.Fatal("test setup: worktree should be dirty")
+	}
+
+	// Stages everything and fails when that differs from HEAD. A clean snapshot
+	// of the commit stages nothing and exits 0; the dirty worktree does not.
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{
+			UnitTestCommand: "git add -A && git diff --quiet --cached HEAD",
+		}},
+	}
+
+	if err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", head); err != nil {
+		t.Fatalf("RecordTestPass ran against the dirty worktree: %v", err)
+	}
+	// The worker's own uncommitted state must be left exactly as it was.
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "dirty" {
+		t.Fatalf("worker worktree marker changed: data=%q err=%v", data, err)
+	}
+	if data, err := os.ReadFile(untracked); err != nil || string(data) != "dirty" {
+		t.Fatalf("worker untracked file changed: data=%q err=%v", data, err)
+	}
+	if _, ok := st.testPasses["mer-1\x00"+head]; !ok {
+		t.Fatalf("passes = %#v, want the full sha %s", st.testPasses, head)
 	}
 }
 
@@ -426,7 +529,7 @@ func TestRecordTestPassRejectsOtherHead(t *testing.T) {
 			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
 		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
 	}
-	err := New(nil, st).RecordTestPass(context.Background(), "mer-1", strings.Repeat("a", 40))
+	err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", strings.Repeat("a", 40))
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid for a foreign head", err)
 	}
@@ -435,10 +538,83 @@ func TestRecordTestPassRejectsOtherHead(t *testing.T) {
 	}
 }
 
-// A suite that exits 0 but leaves the worktree on a different commit must not
-// record a pass: the pass would claim the requested head was tested.
+// A suite that exits 0 must not record a pass when the requested ref no longer
+// names the commit it started with. The snapshot is checked out already, so the
+// suite is simulated moving the ref itself.
 func TestRecordTestPassRejectsHeadMovedByTheSuite(t *testing.T) {
 	worktree, head := initTestRepo(t)
+	gitOutput(t, worktree, "branch", "reviewed", head)
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{
+			// The snapshot is detached, so committing there cannot move the ref
+			// under review by itself; the suite moves it explicitly.
+			UnitTestCommand: "git commit --allow-empty -m moved && git branch -f reviewed HEAD",
+		}},
+	}
+
+	err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", "reviewed")
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid when the requested ref moves", err)
+	}
+	if len(st.testPasses) != 0 {
+		t.Fatalf("passes = %#v, want nothing recorded", st.testPasses)
+	}
+
+	// Confirm the case under test really happened: reviewed moved off the
+	// commit the run started with.
+	if got := gitOutput(t, worktree, "rev-list", "--count", "reviewed"); got != "2" {
+		t.Fatalf("reviewed has %s commits, want the suite's extra commit", got)
+	}
+}
+
+// The snapshot needs the project's shared files, or a suite that reads a
+// gitignored .env fails there while the worker's own workspace is ready. It
+// must not get the project's Setup steps: those are session-creation hooks that
+// provision external resources, and replaying them for a throwaway checkout
+// would repeat those side effects (and could race a real spawn).
+func TestRecordTestPassLinksSharedFilesWithoutReplayingSetup(t *testing.T) {
+	worktree, head := initTestRepo(t)
+	if err := os.WriteFile(filepath.Join(worktree, "shared.env"), []byte("TOKEN=1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Setup leaves a marker, and the suite fails if it finds one. A snapshot
+	// that replayed Setup would therefore fail this run.
+	setup := "echo ran > post-create-ran"
+	suite := "test -f shared.env && test ! -e post-create-ran"
+	symlinks := []string{"shared.env"}
+	if runtime.GOOS == "windows" {
+		// Creating a symlink needs a host privilege this test does not have, so
+		// only the Setup half is asserted there.
+		setup = `echo ran> post-create-ran`
+		suite = `if exist post-create-ran exit 1`
+		symlinks = nil
+	}
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Path: worktree, Config: domain.ProjectConfig{
+			UnitTestCommand: suite, Symlinks: symlinks, PostCreate: []string{setup},
+		}},
+	}
+
+	if err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", head); err != nil {
+		t.Fatalf("RecordTestPass: %v", err)
+	}
+	if _, ok := st.testPasses["mer-1\x00"+head]; !ok {
+		t.Fatalf("passes = %#v, want a pass recorded after the suite ran", st.testPasses)
+	}
+	// Neither the snapshot's marker nor a copy in the worker's worktree.
+	if _, statErr := os.Stat(filepath.Join(worktree, "post-create-ran")); !os.IsNotExist(statErr) {
+		t.Fatalf("Setup ran for the unit-test snapshot: err=%v", statErr)
+	}
+}
+
+// Setup or the suite can move the snapshot's own HEAD. The pass names the
+// requested commit, so a snapshot that left it tested something else.
+func TestRecordTestPassRejectsSnapshotHeadMovedByTheSuite(t *testing.T) {
+	worktree, _ := initTestRepo(t)
 	st := &fakeStore{
 		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
 			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
@@ -447,21 +623,105 @@ func TestRecordTestPassRejectsHeadMovedByTheSuite(t *testing.T) {
 		}},
 	}
 
-	err := New(nil, st).RecordTestPass(context.Background(), "mer-1", head)
+	err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", "HEAD")
 	if !errors.Is(err, ErrInvalid) {
-		t.Fatalf("err = %v, want ErrInvalid when the suite moves HEAD", err)
+		t.Fatalf("err = %v, want ErrInvalid when the snapshot HEAD moves", err)
 	}
 	if len(st.testPasses) != 0 {
 		t.Fatalf("passes = %#v, want nothing recorded", st.testPasses)
 	}
+}
 
-	// Confirm the case under test really happened: the run did move HEAD.
-	moved, revErr := exec.Command("git", "-C", worktree, "rev-parse", "HEAD").Output()
-	if revErr != nil {
-		t.Fatalf("rev-parse HEAD: %v", revErr)
+// A suite may rewrite a tracked file instead of committing. The commit under
+// review no longer describes the tree that ran, so the pass would be false.
+func TestRecordTestPassRejectsSnapshotTrackedFileChanges(t *testing.T) {
+	worktree, _ := initTestRepo(t)
+	if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("committed\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(moved)) == head {
-		t.Fatal("test setup did not move the worktree HEAD")
+	gitOutput(t, worktree, "add", "tracked.txt")
+	gitOutput(t, worktree, "commit", "-m", "add tracked file")
+
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{
+			UnitTestCommand: "echo rewritten >> tracked.txt",
+		}},
+	}
+
+	err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", "HEAD")
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid when the snapshot's tracked files change", err)
+	}
+	if len(st.testPasses) != 0 {
+		t.Fatalf("passes = %#v, want nothing recorded", st.testPasses)
+	}
+	// The worker's own copy is untouched: the suite ran in the snapshot.
+	if got := gitOutput(t, worktree, "status", "--porcelain", "--untracked-files=no"); got != "" {
+		t.Fatalf("worker worktree changed: %q", got)
+	}
+}
+
+// Snapshot state belongs inside the AO state root, and a completed run must not
+// leave its checkout behind: both are what keeps AO state under ~/.ao.
+func TestUnitTestSnapshotsLiveUnderTheDataDirAndAreRemoved(t *testing.T) {
+	dataDir := t.TempDir()
+	worktree, head := initTestRepo(t)
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
+	}
+	svc := New(nil, st, WithDataDir(dataDir))
+	if root, err := svc.unitTestRoot(); err != nil || root != filepath.Join(dataDir, "review-tests") {
+		t.Fatalf("unitTestRoot() = %q, %v, want %q", root, err, filepath.Join(dataDir, "review-tests"))
+	}
+	if err := svc.RecordTestPass(context.Background(), "mer-1", head); err != nil {
+		t.Fatalf("RecordTestPass: %v", err)
+	}
+	leftovers, err := os.ReadDir(filepath.Join(dataDir, "review-tests"))
+	if err != nil {
+		t.Fatalf("snapshot root missing under the data dir: %v", err)
+	}
+	if len(leftovers) != 0 {
+		names := make([]string, 0, len(leftovers))
+		for _, entry := range leftovers {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("leftover snapshots after a completed run: %v", names)
+	}
+	// Without a data dir there is nowhere inside the state boundary to put it,
+	// so the gate refuses instead of falling back to the OS temp dir.
+	if _, err := New(nil, st).unitTestRoot(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unitTestRoot without a data dir = %v, want ErrInvalid", err)
+	}
+}
+
+// A run killed mid-suite never reaches its cleanup, so the next run has to
+// remove what it left behind while leaving in-flight snapshots alone.
+func TestCleanAbandonedUnitTestSnapshotsKeepsLiveRuns(t *testing.T) {
+	root := t.TempDir()
+	live := filepath.Join(root, "run-live")
+	dead := filepath.Join(root, "run-dead")
+	for _, dir := range []string{live, dead} {
+		if err := os.MkdirAll(filepath.Join(dir, "snapshot"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	stale := now.Add(-unitTestSnapshotMaxAge - time.Minute)
+	if err := os.Chtimes(dead, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanAbandonedUnitTestSnapshots(root, now)
+
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("in-flight snapshot removed: %v", err)
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Fatalf("abandoned snapshot kept: err=%v", err)
 	}
 }
 
@@ -484,6 +744,16 @@ func initTestRepo(t *testing.T) (string, string) {
 	run("config", "user.name", "test")
 	run("commit", "--allow-empty", "-m", "init")
 	return dir, run("rev-parse", "HEAD")
+}
+
+// gitOutput runs one git command in dir and returns its trimmed output.
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v (%s)", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func TestSubmitApprovedWritesWorkerAndReviewerReports(t *testing.T) {
@@ -514,6 +784,88 @@ func TestSubmitApprovedWritesWorkerAndReviewerReports(t *testing.T) {
 	}
 	if len(reporter.notes) != 0 {
 		t.Fatalf("resubmit wrote reports again: %#v", reporter.notes)
+	}
+}
+
+// A verdict is stored before its done reports are created, so a failed or
+// interrupted report write must be recoverable: resubmitting the same verdict
+// has to create whichever report is still missing. Skipping the write because a
+// verdict already exists would leave the orchestrator permanently uninformed.
+func TestSubmitRetriesTheMissingApprovalReport(t *testing.T) {
+	st := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-1", SessionID: "mer-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunRunning},
+	}
+	// The worker report lands; the reviewer report's write fails.
+	reporter := &recordingReporter{failAfter: 1}
+	svc := New(nil, st, WithApprovalReporter(reporter))
+
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictApproved, "looks good", "9"); err == nil {
+		t.Fatal("Submit with a failing report write: want an error")
+	}
+	if len(reporter.existing) != 1 || !strings.HasPrefix(reporter.existing[0].Note, "worker: ") {
+		t.Fatalf("reports after the failed write = %#v, want only the worker report", reporter.existing)
+	}
+
+	// The verdict is now stored, which is exactly the state a retry sees.
+	st.run.Status, st.run.Verdict = domain.ReviewRunComplete, domain.VerdictApproved
+	reporter.failAfter = 0
+	reporter.notes = nil
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictApproved, "looks good", "9"); err != nil {
+		t.Fatalf("retry Submit: %v", err)
+	}
+	if len(reporter.notes) != 1 || !strings.HasPrefix(reporter.notes[0], "reviewer: ") {
+		t.Fatalf("retry wrote %#v, want only the missing reviewer report", reporter.notes)
+	}
+
+	// A further retry has nothing left to write.
+	reporter.notes = nil
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictApproved, "looks good", "9"); err != nil {
+		t.Fatalf("second retry Submit: %v", err)
+	}
+	if len(reporter.notes) != 0 {
+		t.Fatalf("second retry wrote %#v, want nothing", reporter.notes)
+	}
+}
+
+// The approval reports' dedupe key must identify the review run, not just the
+// PR and head. A second opinion or a rerun lands on the same PR URL and head,
+// and its completion still has to reach the orchestrator instead of matching
+// the earlier run's note and being skipped as already reported.
+func TestSubmitReportsEachRunOnTheSameHead(t *testing.T) {
+	runOnHead := func(id string) domain.ReviewRun {
+		return domain.ReviewRun{ID: id, SessionID: "mer-1", PRURL: "https://github.com/o/r/pull/1",
+			TargetSHA: "sha1", Status: domain.ReviewRunRunning}
+	}
+	st := &fakeStore{
+		ok:        true,
+		run:       runOnHead("run-1"),
+		batchRuns: []domain.ReviewRun{runOnHead("run-1"), runOnHead("run-2")},
+	}
+	reporter := &recordingReporter{}
+	svc := New(nil, st, WithApprovalReporter(reporter))
+
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictApproved, "looks good", "9"); err != nil {
+		t.Fatalf("first Submit: %v", err)
+	}
+	if len(reporter.notes) != 2 {
+		t.Fatalf("notes after the first run = %#v, want worker and reviewer reports", reporter.notes)
+	}
+	firstRunNotes := append([]string(nil), reporter.notes...)
+
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-2", domain.VerdictApproved, "looks good", "10"); err != nil {
+		t.Fatalf("second Submit on the same head: %v", err)
+	}
+	if len(reporter.notes) != 4 {
+		t.Fatalf("notes after the second run = %#v, want two more reports for its own run", reporter.notes)
+	}
+	for i, note := range reporter.notes[2:] {
+		if note == firstRunNotes[i] {
+			t.Fatalf("second run reused the first run's note: %q", note)
+		}
+		if !strings.Contains(note, "run run-2") {
+			t.Fatalf("second run note = %q, want it keyed to run run-2", note)
+		}
 	}
 }
 

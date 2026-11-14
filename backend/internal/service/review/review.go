@@ -99,12 +99,21 @@ type Service struct {
 	// its eighteen-method store. Defaulted in New; only tests replace it.
 	engineTrigger func(context.Context, domain.SessionID, reviewcore.TriggerOptions) (reviewcore.TriggerResult, error)
 	reports       approvalReporter
+	// dataDir is the daemon's state root. Unit-test snapshots live under it so
+	// AO-owned checkouts stay inside the state boundary instead of the OS temp
+	// directory.
+	dataDir string
 }
 
 // approvalReporter persists the done reports the review service writes when a
 // submission is approved. Nil in tests that do not care about those reports.
+//
+// ListSessionReports is what makes those writes retryable: a submission whose
+// approval reports only partly landed can be re-submitted, and the missing
+// report is the one the listener does not already hold.
 type approvalReporter interface {
 	Create(ctx context.Context, input reportsvc.CreateInput) (domain.ReportRecord, error)
+	ListSessionReports(ctx context.Context, id domain.SessionID) ([]domain.ReportRecord, error)
 }
 
 type reviewNotificationSink interface {
@@ -199,6 +208,11 @@ func (s *Service) SetApprovalReporter(r approvalReporter) {
 	if s != nil {
 		s.reports = r
 	}
+}
+
+// WithDataDir sets the daemon state root the unit-test snapshots live under.
+func WithDataDir(dir string) Option {
+	return func(s *Service) { s.dataDir = dir }
 }
 
 // WithClock overrides the service clock for tests.
@@ -878,13 +892,9 @@ func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, rev
 		return nil, fmt.Errorf("review service store is not configured")
 	}
 	runs := make([]domain.ReviewRun, 0, len(reviews))
-	var freshApproved []domain.ReviewRun
-	allApproved := true
 	var supersededRunIDs []string
 	for _, review := range reviews {
-		prior, _, _ := s.store.GetReviewRun(ctx, review.RunID)
 		run, err := s.submitOne(ctx, workerID, review)
-		fresh := prior.Status == domain.ReviewRunRunning
 		if err != nil {
 			// A newer trigger or lifecycle cancellation may have made one queued
 			// run terminal while the reviewer was working. That run is no longer
@@ -896,12 +906,6 @@ func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, rev
 			return nil, err
 		}
 		runs = append(runs, run)
-		if run.Verdict != domain.VerdictApproved {
-			allApproved = false
-		}
-		if fresh && run.Verdict == domain.VerdictApproved {
-			freshApproved = append(freshApproved, run)
-		}
 	}
 	if len(runs) == 0 {
 		if len(supersededRunIDs) > 0 {
@@ -913,14 +917,31 @@ func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, rev
 	// its review on the provider, and the SCM observer forwards unresolved
 	// review comments to the worker like any other reviewer's.
 	// An approved submission also writes the worker and reviewer done reports.
-	// A changes_requested verdict does not. Re-submitting an already recorded
-	// approval does not write them again.
-	if s.reports != nil && allApproved && len(freshApproved) > 0 {
-		if err := s.writeApprovalReports(ctx, workerID, freshApproved); err != nil {
+	// A changes_requested verdict does not. The write is retryable: it is
+	// keyed on what this worker already reported, not on whether this call
+	// observed the running -> complete transition. A submission whose reports
+	// only partly landed therefore fills in the missing one when it is retried,
+	// instead of being skipped because the verdict is already recorded.
+	if s.reports != nil && issuesApproval(runs) {
+		if err := s.writeApprovalReports(ctx, workerID, runs); err != nil {
 			return nil, err
 		}
 	}
 	return runs, nil
+}
+
+// issuesApproval reports whether this submission approved every run in it.
+// An empty submission is not an approval.
+func issuesApproval(runs []domain.ReviewRun) bool {
+	if len(runs) == 0 {
+		return false
+	}
+	for _, run := range runs {
+		if run.Verdict != domain.VerdictApproved {
+			return false
+		}
+	}
+	return true
 }
 
 // RecordTestPass runs the project's unit-test command in the worker's worktree
@@ -958,18 +979,47 @@ func (s *Service) RecordTestPass(ctx context.Context, workerID domain.SessionID,
 	}
 	command := strings.TrimSpace(project.Config.UnitTestCommand)
 	if command == "" {
-		return fmt.Errorf("%w: project %q has no unitTestCommand; set one with ao project set-config --unit-test-command", ErrInvalid, project.ID)
+		// No command means this project has no test gate. Reviews still start,
+		// so recording a pass is a no-op rather than an error: the endpoint
+		// exists for projects that configured one.
+		return nil
 	}
-	if err := s.runUnitTests(ctx, workspacePath, command, sha, project.Config.Env); err != nil {
+	// The suite runs against a clean snapshot of the requested commit, and the
+	// pass is recorded for the full SHA it resolved to. A short SHA stored
+	// verbatim would never match the provider's full head SHA at trigger time.
+	testedSHA, err := s.runUnitTests(ctx, project, workspacePath, command, sha, project.Config.Env)
+	if err != nil {
 		return err
 	}
-	return s.store.RecordReviewTestPass(ctx, workerID, sha, s.clock())
+	return s.store.RecordReviewTestPass(ctx, workerID, testedSHA, s.clock())
 }
 
+// writeApprovalReports writes the worker and reviewer done reports, skipping the
+// ones the worker already reported for this approval.
+//
+// The lookup is what makes the write retryable. A first attempt can persist one
+// report and then fail or be interrupted before the other; a later submission
+// sees the stored one, writes only the missing one, and the approval ends up
+// with both. Keying on the stored reports rather than on the current call's
+// state transition is what lets a retry after the verdict is recorded still
+// repair the gap.
 func (s *Service) writeApprovalReports(ctx context.Context, workerID domain.SessionID, runs []domain.ReviewRun) error {
 	detail := approvalDetail(runs)
+	existing, err := s.reports.ListSessionReports(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	reported := make(map[string]bool, len(existing))
+	for _, rec := range existing {
+		if rec.State == domain.ReportDone {
+			reported[rec.Note] = true
+		}
+	}
 	for _, prefix := range []string{"worker: ", "reviewer: "} {
 		note := truncateReportNote(prefix + "approved " + detail)
+		if reported[note] {
+			continue
+		}
 		if _, err := s.reports.Create(ctx, reportsvc.CreateInput{SessionID: workerID, State: domain.ReportDone, Note: note}); err != nil {
 			return err
 		}
@@ -977,10 +1027,15 @@ func (s *Service) writeApprovalReports(ctx context.Context, workerID domain.Sess
 	return nil
 }
 
+// approvalDetail describes an approval in the report note. Each run's id leads
+// its entry because the note is also the report's dedupe key: a rerun or a
+// second opinion on the same head is a different run and must still produce its
+// own completion reports, while a retry of the same run must match the note it
+// already wrote. The id goes first so truncation cannot drop it.
 func approvalDetail(runs []domain.ReviewRun) string {
 	parts := make([]string, 0, len(runs))
 	for _, run := range runs {
-		parts = append(parts, fmt.Sprintf("PR %s head %s", run.PRURL, run.TargetSHA))
+		parts = append(parts, fmt.Sprintf("run %s: PR %s head %s", run.ID, run.PRURL, run.TargetSHA))
 	}
 	return strings.Join(parts, "; ")
 }

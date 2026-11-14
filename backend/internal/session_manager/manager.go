@@ -6988,6 +6988,16 @@ func (m *Manager) provisionWorkspace(ctx context.Context, project domain.Project
 	return runPostCreate(ctx, workspacePath, project.Path, project.Config.PostCreate, project.Config.Env, aoEnv)
 }
 
+// ApplySharedSymlinks links the project's configured shared files into an
+// existing checkout. It is deliberately only the symlink half of workspace
+// provisioning: Setup steps are session-creation hooks that provision external
+// resources (databases, services), so replaying them for a throwaway checkout
+// would repeat those side effects, possibly concurrently with a real spawn.
+// Callers that need a ready checkout without those side effects use this.
+func ApplySharedSymlinks(project domain.ProjectRecord, workspacePath string) error {
+	return applySymlinks(project.Path, workspacePath, project.Config.Symlinks)
+}
+
 // applySymlinks links each repo-relative path into the workspace. A source that
 // does not exist is skipped (symlinks are a convenience for optional files like
 // .env); a real link failure aborts. Paths must be repo-relative with no

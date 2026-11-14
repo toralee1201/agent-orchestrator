@@ -115,7 +115,7 @@ func resolveUnitTestCommit(ctx context.Context, workspacePath, sha string) (stri
 func unitTestSnapshot(ctx context.Context, workspacePath, commit string) (string, func(), error) {
 	root, err := os.MkdirTemp("", "ao-review-tests-")
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: cannot create a snapshot directory: %v", ErrInvalid, err)
+		return "", nil, fmt.Errorf("%w: cannot create a snapshot directory: %w", ErrInvalid, err)
 	}
 	snapshot := filepath.Join(root, "snapshot")
 	cleanup := func() { _ = os.RemoveAll(root) }

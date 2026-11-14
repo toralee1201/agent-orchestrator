@@ -58,12 +58,23 @@ func (s *Service) runUnitTests(ctx context.Context, project domain.ProjectRecord
 	defer cleanup()
 
 	// The snapshot is a pristine checkout, which by itself breaks any suite that
-	// needs installed dependencies or a shared .env: npm test in a fresh worktree
-	// has no node_modules. Prepare it exactly like a session workspace so the
-	// gate reflects whether the commit's suite passes in a ready workspace,
-	// rather than failing for lack of setup the worker's own workspace has.
-	if err := sessionmanager.ProvisionWorkspace(ctx, project, snapshot, nil); err != nil {
+	// needs a shared .env: link the project's configured shared files in, the
+	// same way a spawned workspace gets them. Setup steps are deliberately not
+	// replayed: they are session-creation hooks that provision external
+	// resources, and repeating them for a throwaway checkout would duplicate
+	// those side effects (and could race a real spawn).
+	if err := sessionmanager.ApplySharedSymlinks(project, snapshot); err != nil {
 		return "", fmt.Errorf("%w: cannot prepare the unit-test snapshot: %w", ErrInvalid, err)
+	}
+
+	// Everything after this point must leave the snapshot's own commit and
+	// tracked content alone. Setup and the suite both run inside the snapshot,
+	// so a change to its HEAD or to a tracked file means the tree that ran is
+	// not the tree the pass would name. Capture the state once the checkout is
+	// prepared, then compare after the suite.
+	before, err := unitTestSnapshotState(ctx, snapshot)
+	if err != nil {
+		return "", err
 	}
 
 	output := &boundedOutput{}
@@ -99,7 +110,56 @@ func (s *Service) runUnitTests(ctx context.Context, project domain.ProjectRecord
 	if err := unitTestHeadMatches(ctx, workspacePath, commit); err != nil {
 		return "", err
 	}
+	// The worker's worktree is not what ran: the suite ran in the snapshot, and
+	// setup or the suite itself can have moved that snapshot's HEAD or rewritten
+	// a tracked file. A pass recorded now would name a commit whose content was
+	// never tested.
+	after, err := unitTestSnapshotState(ctx, snapshot)
+	if err != nil {
+		return "", err
+	}
+	if after.head != before.head {
+		return "", fmt.Errorf("%w: the unit-test snapshot moved from %s to %s while the tests ran", ErrInvalid, before.head, after.head)
+	}
+	if after.modified != before.modified {
+		return "", fmt.Errorf("%w: the unit-test snapshot's tracked files changed while the tests ran: %s", ErrInvalid, after.modified)
+	}
 	return commit, nil
+}
+
+// unitTestTreeState records what the snapshot is testing: its own HEAD and
+// which tracked files differ from it. Untracked files are ignored on purpose —
+// installed dependencies and artifacts written by setup are expected, and none
+// of them can change what the recorded commit contains.
+type unitTestTreeState struct {
+	head     string
+	modified string
+}
+
+func unitTestSnapshotState(ctx context.Context, snapshot string) (unitTestTreeState, error) {
+	state := unitTestTreeState{}
+	head := aoprocess.CommandContext(ctx, "git", "-C", snapshot, "rev-parse", "--verify", "HEAD")
+	aoprocess.ConfigureTreeCancellation(head)
+	head.WaitDelay = time.Second
+	out, err := head.Output()
+	if err != nil {
+		return state, fmt.Errorf("%w: cannot read the unit-test snapshot HEAD", ErrInvalid)
+	}
+	state.head = strings.TrimSpace(string(out))
+
+	// No --untracked-files: staged and unstaged edits to tracked files are what
+	// would make the tested tree differ from the commit, and they are listed by
+	// default. Binary/renamed entries still appear as lines, so the comparison
+	// is on the whole listing.
+	status := aoprocess.CommandContext(ctx, "git", "-C", snapshot, "status", "--porcelain", "--untracked-files=no")
+	aoprocess.ConfigureTreeCancellation(status)
+	status.WaitDelay = time.Second
+	out, err = status.Output()
+	if err != nil {
+		return state, fmt.Errorf("%w: cannot read the unit-test snapshot status", ErrInvalid)
+	}
+	state.modified = strings.TrimSpace(string(out))
+	return state, nil
 }
 
 // resolveUnitTestCommit turns a caller-supplied (possibly abbreviated) commit

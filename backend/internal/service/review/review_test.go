@@ -569,24 +569,26 @@ func TestRecordTestPassRejectsHeadMovedByTheSuite(t *testing.T) {
 	}
 }
 
-// A suite that needs prepared dependencies must not be blocked just because the
-// snapshot is fresh: the snapshot is provisioned exactly like a session
-// workspace, with the project's shared-file symlinks and Setup steps, so npm
-// test finds the node_modules the worker's own workspace already has.
-func TestRecordTestPassPreparesTheSnapshotLikeAWorkspace(t *testing.T) {
+// The snapshot needs the project's shared files, or a suite that reads a
+// gitignored .env fails there while the worker's own workspace is ready. It
+// must not get the project's Setup steps: those are session-creation hooks that
+// provision external resources, and replaying them for a throwaway checkout
+// would repeat those side effects (and could race a real spawn).
+func TestRecordTestPassLinksSharedFilesWithoutReplayingSetup(t *testing.T) {
 	worktree, head := initTestRepo(t)
 	if err := os.WriteFile(filepath.Join(worktree, "shared.env"), []byte("TOKEN=1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The suite needs both a shared file and an installed dependency.
-	setup := "mkdir -p deps && echo ready > deps/node_modules"
-	suite := "cat shared.env >/dev/null && cat deps/node_modules >/dev/null"
+	// Setup leaves a marker, and the suite fails if it finds one. A snapshot
+	// that replayed Setup would therefore fail this run.
+	setup := "echo ran > post-create-ran"
+	suite := "test -f shared.env && test ! -e post-create-ran"
 	symlinks := []string{"shared.env"}
 	if runtime.GOOS == "windows" {
-		// Symlink creation needs a host privilege this unit test does not have,
-		// so only the Setup half is asserted there.
-		setup = `if not exist deps mkdir deps && echo ready> deps\node_modules`
-		suite = `type deps\node_modules >nul`
+		// Creating a symlink needs a host privilege this test does not have, so
+		// only the Setup half is asserted there.
+		setup = `echo ran> post-create-ran`
+		suite = `if exist post-create-ran exit 1`
 		symlinks = nil
 	}
 	st := &fakeStore{
@@ -601,11 +603,63 @@ func TestRecordTestPassPreparesTheSnapshotLikeAWorkspace(t *testing.T) {
 		t.Fatalf("RecordTestPass: %v", err)
 	}
 	if _, ok := st.testPasses["mer-1\x00"+head]; !ok {
-		t.Fatalf("passes = %#v, want a pass recorded after the provisioned suite ran", st.testPasses)
+		t.Fatalf("passes = %#v, want a pass recorded after the suite ran", st.testPasses)
 	}
-	// Setup ran in the snapshot, not the worker's worktree.
-	if _, statErr := os.Stat(filepath.Join(worktree, "deps")); !os.IsNotExist(statErr) {
-		t.Fatalf("Setup wrote into the worker's worktree: err=%v", statErr)
+	// Neither the snapshot's marker nor a copy in the worker's worktree.
+	if _, statErr := os.Stat(filepath.Join(worktree, "post-create-ran")); !os.IsNotExist(statErr) {
+		t.Fatalf("Setup ran for the unit-test snapshot: err=%v", statErr)
+	}
+}
+
+// Setup or the suite can move the snapshot's own HEAD. The pass names the
+// requested commit, so a snapshot that left it tested something else.
+func TestRecordTestPassRejectsSnapshotHeadMovedByTheSuite(t *testing.T) {
+	worktree, _ := initTestRepo(t)
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{
+			UnitTestCommand: "git commit --allow-empty -m moved",
+		}},
+	}
+
+	err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", "HEAD")
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid when the snapshot HEAD moves", err)
+	}
+	if len(st.testPasses) != 0 {
+		t.Fatalf("passes = %#v, want nothing recorded", st.testPasses)
+	}
+}
+
+// A suite may rewrite a tracked file instead of committing. The commit under
+// review no longer describes the tree that ran, so the pass would be false.
+func TestRecordTestPassRejectsSnapshotTrackedFileChanges(t *testing.T) {
+	worktree, _ := initTestRepo(t)
+	if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("committed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOutput(t, worktree, "add", "tracked.txt")
+	gitOutput(t, worktree, "commit", "-m", "add tracked file")
+
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{
+			UnitTestCommand: "echo rewritten >> tracked.txt",
+		}},
+	}
+
+	err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", "HEAD")
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid when the snapshot's tracked files change", err)
+	}
+	if len(st.testPasses) != 0 {
+		t.Fatalf("passes = %#v, want nothing recorded", st.testPasses)
+	}
+	// The worker's own copy is untouched: the suite ran in the snapshot.
+	if got := gitOutput(t, worktree, "status", "--porcelain", "--untracked-files=no"); got != "" {
+		t.Fatalf("worker worktree changed: %q", got)
 	}
 }
 

@@ -484,17 +484,27 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		}
 		return true
 	}
-	for _, reviewState := range reviews {
-		if !reviewDue(reviewState) {
-			continue
-		}
-		sha := strings.TrimSpace(reviewState.TargetSHA)
-		passed, err := e.store.HasReviewTestPass(ctx, workerID, sha)
-		if err != nil {
-			return TriggerResult{}, err
-		}
-		if sha == "" || !passed {
-			return TriggerResult{}, fmt.Errorf("%w: head %s", ErrTestsNotPassed, sha)
+	// The unit-test gate is opt-in. A project with no unitTestCommand has
+	// nothing for the daemon to run, so its reviews keep the original flow:
+	// no recorded pass is required and none is ever written. Requiring one
+	// unconditionally would make every existing project untriggerable.
+	requiresTestPass, err := e.projectRequiresTestPass(ctx, worker.ProjectID)
+	if err != nil {
+		return TriggerResult{}, err
+	}
+	if requiresTestPass {
+		for _, reviewState := range reviews {
+			if !reviewDue(reviewState) {
+				continue
+			}
+			sha := strings.TrimSpace(reviewState.TargetSHA)
+			passed, err := e.store.HasReviewTestPass(ctx, workerID, sha)
+			if err != nil {
+				return TriggerResult{}, err
+			}
+			if sha == "" || !passed {
+				return TriggerResult{}, fmt.Errorf("%w: head %s", ErrTestsNotPassed, sha)
+			}
 		}
 	}
 
@@ -2022,6 +2032,22 @@ func (e *Engine) projectEnv(ctx stdctx.Context, id domain.ProjectID) (map[string
 		return nil, err
 	}
 	return project.Config.Env, nil
+}
+
+// projectRequiresTestPass reports whether a review of this project must wait
+// for a recorded unit-test pass. Only a project that configured a
+// unitTestCommand opts in: without a command there is nothing to run, so the
+// gate stays out of the way and reviews work exactly as they did before it
+// existed.
+func (e *Engine) projectRequiresTestPass(ctx stdctx.Context, id domain.ProjectID) (bool, error) {
+	if e.projects == nil {
+		return false, nil
+	}
+	project, ok, err := e.projects.GetProject(ctx, string(id))
+	if err != nil || !ok {
+		return false, err
+	}
+	return strings.TrimSpace(project.Config.UnitTestCommand) != "", nil
 }
 
 // projectReviewBrief returns the project's orchestrator review brief, copied

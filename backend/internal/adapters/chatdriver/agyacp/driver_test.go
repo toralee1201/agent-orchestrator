@@ -54,11 +54,11 @@ func TestConfigureLaunchesTheAgyCLIAcpSubcommand(t *testing.T) {
 			cfg: acpdriver.LaunchConfig{
 				WorkspacePath: `C:\work`, Model: "gemini-4-argon", Effort: "high",
 				SystemPrompt: "Follow AO rules.", Permissions: ports.PermissionModeBypassPermissions,
-				AdditionalDirectories: []string{` C:\extra `, "", `D:\other`},
+				AdditionalDirectories: []string{` C:\extra `, "", `D:\second`},
 			},
 			want: []string{
 				"acp", "--dangerously-skip-permissions",
-				"--add-dir", `C:\extra`, "--add-dir", `D:\other`,
+				"--add-dir", `C:\extra`, "--add-dir", `D:\second`,
 			},
 		},
 	}

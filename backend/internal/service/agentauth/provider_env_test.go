@@ -13,12 +13,16 @@ import (
 func TestEverySupportedHarnessHasAccountSetupMethod(t *testing.T) {
 	// These CLIs authenticate through their own account flow and have no
 	// documented provider-key environment source for their runtime.
+	// Qoder and CodeBuddy keep LaunchDocumentation plans because AO does not
+	// drive their login command or write their settings.
 	accountOnly := map[domain.AgentHarness]bool{
 		domain.HarnessAgy: true, domain.HarnessAuggie: true, domain.HarnessMiMoCode: true,
+		domain.HarnessQoder: true, domain.HarnessCodeBuddy: true,
 	}
 	for _, harness := range domain.AllHarnesses {
 		methods := loginMethods(string(harness))
-		if len(methods) == 0 {
+		plan := planByAgentID[string(harness)]
+		if len(methods) == 0 && !(accountOnly[harness] && plan.LaunchMode == LaunchDocumentation) {
 			t.Errorf("%s has no Account setup method", harness)
 		}
 		if accountOnly[harness] {

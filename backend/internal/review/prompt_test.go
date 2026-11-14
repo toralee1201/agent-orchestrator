@@ -65,3 +65,42 @@ func TestReviewPromptRequiresInlineCommentsForRequiredChanges(t *testing.T) {
 		t.Fatalf("review prompt still makes inline comments optional:\n%s", prompt)
 	}
 }
+
+// The orchestrator review brief is included verbatim in the reviewer prompt,
+// supplements the standing checklist, never relaxes the no-modify rule, and is
+// omitted entirely when empty.
+func TestReviewTextsIncludesReviewBrief(t *testing.T) {
+	brief := "Prioritise auth and session regressions over style nits."
+	spec := launchSpec()
+	spec.ReviewBrief = brief
+
+	prompt, system := reviewTexts(spec)
+	for _, want := range []string{
+		"## Review brief from the orchestrator",
+		brief,
+		"in addition to the standing review checklist",
+		"never overrides the standing rule that you do not modify the checkout",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if !strings.Contains(system, "or otherwise modify the checkout — review only") {
+		t.Fatalf("system prompt must still forbid modifying the checkout:\n%s", system)
+	}
+
+	for _, empty := range []string{"", "   \n\t"} {
+		spec.ReviewBrief = empty
+		got, _ := reviewTexts(spec)
+		if strings.Contains(got, "## Review brief from the orchestrator") {
+			t.Fatalf("prompt must omit the brief section when brief is %q:\n%s", empty, got)
+		}
+	}
+}
+
+func TestReviewTextsDoesNotAskTheReviewerToReport(t *testing.T) {
+	prompt, _ := reviewTexts(launchSpec())
+	if strings.Contains(prompt, "ao report") {
+		t.Fatalf("reviewer prompt must not ask the model to ao report:\n%s", prompt)
+	}
+}

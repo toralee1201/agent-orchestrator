@@ -12663,6 +12663,53 @@ paths:
       summary: Switch a worker's reviewer harness
       tags:
       - reviews
+  /api/v1/sessions/{sessionId}/reviews/test-pass:
+    post:
+      operationId: recordReviewTestPass
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersTestPassInput'
+        required: true
+      responses:
+        "204":
+          description: No Content
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Record that unit tests passed for a worker PR head
+      tags:
+      - reviews
   /api/v1/sessions/{sessionId}/reviews/trigger:
     post:
       operationId: triggerReview
@@ -18477,6 +18524,14 @@ components:
       required:
       - enabled
       type: object
+    ControllersTestPassInput:
+      properties:
+        sha:
+          description: PR head commit whose unit tests passed.
+          type: string
+      required:
+      - sha
+      type: object
     ConversationAccountPayload:
       properties:
         authFailureId:
@@ -21688,6 +21743,8 @@ components:
           items:
             type: string
           type: array
+        reviewBrief:
+          type: string
         reviewers:
           items:
             $ref: '#/components/schemas/DomainReviewerConfig'
@@ -21700,6 +21757,8 @@ components:
           type: array
         trackerIntake:
           $ref: '#/components/schemas/TrackerIntakeConfig'
+        unitTestCommand:
+          type: string
         worker:
           $ref: '#/components/schemas/RoleOverride'
         workersRequestReview:

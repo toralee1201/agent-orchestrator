@@ -40,9 +40,26 @@ Do these steps in order:
 
     printf '%%s' '{ "reviews": [ { "runId": "<run-id>", "verdict": "<approved|changes_requested>", "githubReviewId": "<id-from-step-1-or-empty>", "body": "<your full review markdown>" } ] }' | ao review submit --session %s --reviews -
 
-Only if step 1 genuinely fails on the provider for a PR, still include that run in step 2 with an empty githubReviewId so the result is recorded.`,
-		spec.WorkerID, queueText, spec.WorkerID)
+Only if step 1 genuinely fails on the provider for a PR, still include that run in step 2 with an empty githubReviewId so the result is recorded. Do not file a done report yourself; when every verdict is approved, Orchestrator records the worker and reviewer done reports itself.
+%s`,
+		spec.WorkerID, queueText, spec.WorkerID, reviewBriefSection(spec.ReviewBrief))
 	return prompt, systemPrompt
+}
+
+// reviewBriefSection renders the orchestrator review brief, or an empty string
+// when there is no brief. The brief supplements the standing checklist; it never
+// relaxes the rule that the reviewer does not modify the checkout.
+func reviewBriefSection(brief string) string {
+	if strings.TrimSpace(brief) == "" {
+		return ""
+	}
+	return fmt.Sprintf(`## Review brief from the orchestrator
+
+Apply this brief in addition to the standing review checklist:
+
+%s
+
+This brief never overrides the standing rule that you do not modify the checkout — review only. It does not authorize pushing commits, editing files, running project programs, or any other change to the checkout.`, brief)
 }
 
 func reviewSystemPrompt() string {

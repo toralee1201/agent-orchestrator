@@ -17,6 +17,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/reqid"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
+	reportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/report"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
@@ -77,6 +78,7 @@ type Manager interface {
 	ApplyReviewActivitySignal(ctx context.Context, reviewSessionID string, signal ActivitySignal) error
 	Submit(ctx context.Context, workerID domain.SessionID, runID string, verdict domain.ReviewVerdict, body, githubReviewID string) (domain.ReviewRun, error)
 	SubmitMany(ctx context.Context, workerID domain.SessionID, reviews []SubmittedReview) ([]domain.ReviewRun, error)
+	RecordTestPass(ctx context.Context, workerID domain.SessionID, sha string) error
 	List(ctx context.Context, workerID domain.SessionID) (reviewcore.SessionReviews, error)
 }
 
@@ -96,6 +98,13 @@ type Service struct {
 	// instrumented path can be exercised without standing up a full engine and
 	// its eighteen-method store. Defaulted in New; only tests replace it.
 	engineTrigger func(context.Context, domain.SessionID, reviewcore.TriggerOptions) (reviewcore.TriggerResult, error)
+	reports       approvalReporter
+}
+
+// approvalReporter persists the done reports the review service writes when a
+// submission is approved. Nil in tests that do not care about those reports.
+type approvalReporter interface {
+	Create(ctx context.Context, input reportsvc.CreateInput) (domain.ReportRecord, error)
 }
 
 type reviewNotificationSink interface {
@@ -117,6 +126,7 @@ type Store interface {
 	UpdateReviewActivity(ctx context.Context, id string, state domain.ActivityState, agentSessionID, launchID string) (bool, error)
 	GetReviewRun(ctx context.Context, id string) (domain.ReviewRun, bool, error)
 	GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
+	GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error)
 	SetSessionAutoInjectReview(ctx context.Context, id domain.SessionID, autoInject bool, updatedAt time.Time) (bool, error)
 	UpdateReviewRunResult(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error)
 	ListPRsBySession(ctx context.Context, id domain.SessionID) ([]domain.PullRequest, error)
@@ -125,6 +135,7 @@ type Store interface {
 	// MarkPRReviewThreadResolved records a thread resolved along with all its
 	// comments; the PR summary reads a thread's state from the thread row.
 	MarkPRReviewThreadResolved(ctx context.Context, prURL, threadID string) error
+	RecordReviewTestPass(ctx context.Context, sessionID domain.SessionID, sha string, at time.Time) error
 }
 
 // PRRefresher fetches one pull request fresh from its provider and records it
@@ -175,6 +186,19 @@ type ThreadRefresher interface {
 // without waiting for the poller to notice them.
 func WithThreadRefresher(r ThreadRefresher) Option {
 	return func(s *Service) { s.reviewRefresher = r }
+}
+
+// WithApprovalReporter writes the worker and reviewer done reports when a
+// submission is approved.
+func WithApprovalReporter(r approvalReporter) Option {
+	return func(s *Service) { s.reports = r }
+}
+
+// SetApprovalReporter wires the done-report writer after both services exist.
+func (s *Service) SetApprovalReporter(r approvalReporter) {
+	if s != nil {
+		s.reports = r
+	}
 }
 
 // WithClock overrides the service clock for tests.
@@ -854,9 +878,13 @@ func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, rev
 		return nil, fmt.Errorf("review service store is not configured")
 	}
 	runs := make([]domain.ReviewRun, 0, len(reviews))
+	var freshApproved []domain.ReviewRun
+	allApproved := true
 	var supersededRunIDs []string
 	for _, review := range reviews {
+		prior, _, _ := s.store.GetReviewRun(ctx, review.RunID)
 		run, err := s.submitOne(ctx, workerID, review)
+		fresh := prior.Status == domain.ReviewRunRunning
 		if err != nil {
 			// A newer trigger or lifecycle cancellation may have made one queued
 			// run terminal while the reviewer was working. That run is no longer
@@ -868,6 +896,12 @@ func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, rev
 			return nil, err
 		}
 		runs = append(runs, run)
+		if run.Verdict != domain.VerdictApproved {
+			allApproved = false
+		}
+		if fresh && run.Verdict == domain.VerdictApproved {
+			freshApproved = append(freshApproved, run)
+		}
 	}
 	if len(runs) == 0 {
 		if len(supersededRunIDs) > 0 {
@@ -877,9 +911,86 @@ func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, rev
 	}
 	// The result reaches the worker through the PR itself: the reviewer posts
 	// its review on the provider, and the SCM observer forwards unresolved
-	// review comments to the worker like any other reviewer's. AO does not send
-	// a second, separate verdict message.
+	// review comments to the worker like any other reviewer's.
+	// An approved submission also writes the worker and reviewer done reports.
+	// A changes_requested verdict does not. Re-submitting an already recorded
+	// approval does not write them again.
+	if s.reports != nil && allApproved && len(freshApproved) > 0 {
+		if err := s.writeApprovalReports(ctx, workerID, freshApproved); err != nil {
+			return nil, err
+		}
+	}
 	return runs, nil
+}
+
+// RecordTestPass runs the project's unit-test command in the worker's worktree
+// and records the pass for that head only when the command exits 0. The worker
+// no longer declares a pass: the daemon proves it. ao review trigger refuses a
+// head with no record, so a failed run leaves the head untriggerable.
+func (s *Service) RecordTestPass(ctx context.Context, workerID domain.SessionID, sha string) error {
+	sha = strings.TrimSpace(sha)
+	if workerID == "" || sha == "" || len(sha) > 128 {
+		return fmt.Errorf("%w: worker session id and head sha are required", ErrInvalid)
+	}
+	if s.store == nil {
+		return fmt.Errorf("review service store is not configured")
+	}
+	session, ok, err := s.store.GetSession(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: worker session %q", ErrNotFound, workerID)
+	}
+	if session.Kind != domain.KindWorker {
+		return fmt.Errorf("%w: test pass can only be recorded for a worker session", ErrInvalid)
+	}
+	workspacePath := strings.TrimSpace(session.Metadata.WorkspacePath)
+	if workspacePath == "" {
+		return fmt.Errorf("%w: worker session %q has no workspace to run tests in", ErrInvalid, workerID)
+	}
+	project, ok, err := s.store.GetProject(ctx, string(session.ProjectID))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: project %q for worker %q", ErrNotFound, session.ProjectID, workerID)
+	}
+	command := strings.TrimSpace(project.Config.UnitTestCommand)
+	if command == "" {
+		return fmt.Errorf("%w: project %q has no unitTestCommand; set one with ao project set-config --unit-test-command", ErrInvalid, project.ID)
+	}
+	if err := s.runUnitTests(ctx, workspacePath, command, sha, project.Config.Env); err != nil {
+		return err
+	}
+	return s.store.RecordReviewTestPass(ctx, workerID, sha, s.clock())
+}
+
+func (s *Service) writeApprovalReports(ctx context.Context, workerID domain.SessionID, runs []domain.ReviewRun) error {
+	detail := approvalDetail(runs)
+	for _, prefix := range []string{"worker: ", "reviewer: "} {
+		note := truncateReportNote(prefix + "approved " + detail)
+		if _, err := s.reports.Create(ctx, reportsvc.CreateInput{SessionID: workerID, State: domain.ReportDone, Note: note}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func approvalDetail(runs []domain.ReviewRun) string {
+	parts := make([]string, 0, len(runs))
+	for _, run := range runs {
+		parts = append(parts, fmt.Sprintf("PR %s head %s", run.PRURL, run.TargetSHA))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func truncateReportNote(note string) string {
+	runes := []rune(note)
+	if len(runes) <= domain.MaxReportTextCharacters {
+		return note
+	}
+	return string(runes[:domain.MaxReportTextCharacters])
 }
 
 func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, review SubmittedReview) (domain.ReviewRun, error) {

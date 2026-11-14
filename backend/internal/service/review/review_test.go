@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
+	reportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/report"
 )
 
 type fakeStore struct {
@@ -30,6 +32,13 @@ type fakeStore struct {
 	updateCalls       int
 	activityUpdates   int
 	resolvedThreadIDs []string
+	testPasses        map[string]time.Time
+
+	// session and project back the daemon-side unit-test gate. Zero values keep
+	// the older tests working: a worker with no workspace, and a project with
+	// no unitTestCommand.
+	session domain.SessionRecord
+	project domain.ProjectRecord
 }
 
 type fakeNotificationSink struct {
@@ -83,12 +92,35 @@ func (f *fakeStore) GetReviewRun(_ context.Context, id string) (domain.ReviewRun
 	return domain.ReviewRun{}, false, nil
 }
 
+func (f *fakeStore) RecordReviewTestPass(_ context.Context, id domain.SessionID, sha string, at time.Time) error {
+	if f.testPasses == nil {
+		f.testPasses = map[string]time.Time{}
+	}
+	f.testPasses[string(id)+"\x00"+sha] = at
+	return nil
+}
+
 func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
 	enabled := true
 	if f.sessionAutoInjectReview != nil {
 		enabled = *f.sessionAutoInjectReview
 	}
-	return domain.SessionRecord{ID: id, AutoInjectReview: enabled}, true, nil
+	if f.session.ID != "" {
+		session := f.session
+		session.AutoInjectReview = enabled
+		return session, true, nil
+	}
+	return domain.SessionRecord{ID: id, Kind: domain.KindWorker, AutoInjectReview: enabled}, true, nil
+}
+
+func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectRecord, bool, error) {
+	if f.project.ID == "" {
+		return domain.ProjectRecord{}, false, nil
+	}
+	if f.project.ID != id {
+		return domain.ProjectRecord{}, false, nil
+	}
+	return f.project, true, nil
 }
 
 func (f *fakeStore) SetSessionAutoInjectReview(_ context.Context, _ domain.SessionID, autoInject bool, _ time.Time) (bool, error) {
@@ -298,6 +330,208 @@ func TestRequestRereviewRejectsUnknownReviewer(t *testing.T) {
 // AO never sends the worker a separate verdict message: the reviewer's posted
 // review reaches the worker through the SCM observer like any other review. A
 // submitted result is recorded and stays complete.
+type recordingReporter struct {
+	notes    []string
+	states   []domain.ReportState
+	sessions []domain.SessionID
+}
+
+func (r *recordingReporter) Create(_ context.Context, input reportsvc.CreateInput) (domain.ReportRecord, error) {
+	r.notes = append(r.notes, input.Note)
+	r.states = append(r.states, input.State)
+	r.sessions = append(r.sessions, input.SessionID)
+	return domain.ReportRecord{ID: "rpt", SessionID: input.SessionID, Note: input.Note, State: input.State}, nil
+}
+
+func TestRecordTestPassRejectsMissingWorker(t *testing.T) {
+	svc := New(nil, &fakeStore{})
+	if err := svc.RecordTestPass(context.Background(), "", "sha1"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing worker err = %v, want ErrInvalid", err)
+	}
+}
+
+// The daemon, not the worker, decides a pass: the configured command runs in
+// the worktree and only exit 0 records anything.
+func TestRecordTestPassRunsProjectCommand(t *testing.T) {
+	worktree, head := initTestRepo(t)
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
+	}
+	svc := New(nil, st)
+
+	if err := svc.RecordTestPass(context.Background(), "mer-1", head); err != nil {
+		t.Fatalf("RecordTestPass: %v", err)
+	}
+	if _, ok := st.testPasses["mer-1\x00"+head]; !ok {
+		t.Fatalf("passes = %#v, want a pass recorded for the head", st.testPasses)
+	}
+}
+
+func TestRecordTestPassFailingCommandRecordsNothing(t *testing.T) {
+	worktree, head := initTestRepo(t)
+	// Fails identically under sh and cmd.exe, and prints a diagnostic the
+	// failure message must carry.
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{
+			UnitTestCommand: "git rev-parse --verify refs/heads/this-branch-does-not-exist",
+		}},
+	}
+	svc := New(nil, st)
+
+	err := svc.RecordTestPass(context.Background(), "mer-1", head)
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid for a failing suite", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "fatal") {
+		t.Fatalf("err = %v, want the failing output in the message", err)
+	}
+	if len(st.testPasses) != 0 {
+		t.Fatalf("passes = %#v, want nothing recorded when tests fail", st.testPasses)
+	}
+}
+
+func TestRecordTestPassRequiresCommandAndWorkspace(t *testing.T) {
+	worktree, head := initTestRepo(t)
+	noCommand := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1"},
+	}
+	if err := New(nil, noCommand).RecordTestPass(context.Background(), "mer-1", head); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("no command err = %v, want ErrInvalid", err)
+	}
+
+	noWorkspace := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
+	}
+	if err := New(nil, noWorkspace).RecordTestPass(context.Background(), "mer-1", head); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("no workspace err = %v, want ErrInvalid", err)
+	}
+	if len(noCommand.testPasses)+len(noWorkspace.testPasses) != 0 {
+		t.Fatal("no pass may be recorded when the gate cannot run")
+	}
+}
+
+// A pass for a head the worktree is not on would let a trigger review an
+// untested commit.
+func TestRecordTestPassRejectsOtherHead(t *testing.T) {
+	worktree, _ := initTestRepo(t)
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
+	}
+	err := New(nil, st).RecordTestPass(context.Background(), "mer-1", strings.Repeat("a", 40))
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid for a foreign head", err)
+	}
+	if len(st.testPasses) != 0 {
+		t.Fatalf("passes = %#v, want nothing recorded", st.testPasses)
+	}
+}
+
+// A suite that exits 0 but leaves the worktree on a different commit must not
+// record a pass: the pass would claim the requested head was tested.
+func TestRecordTestPassRejectsHeadMovedByTheSuite(t *testing.T) {
+	worktree, head := initTestRepo(t)
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Config: domain.ProjectConfig{
+			UnitTestCommand: "git commit --allow-empty -m moved",
+		}},
+	}
+
+	err := New(nil, st).RecordTestPass(context.Background(), "mer-1", head)
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid when the suite moves HEAD", err)
+	}
+	if len(st.testPasses) != 0 {
+		t.Fatalf("passes = %#v, want nothing recorded", st.testPasses)
+	}
+
+	// Confirm the case under test really happened: the run did move HEAD.
+	moved, revErr := exec.Command("git", "-C", worktree, "rev-parse", "HEAD").Output()
+	if revErr != nil {
+		t.Fatalf("rev-parse HEAD: %v", revErr)
+	}
+	if strings.TrimSpace(string(moved)) == head {
+		t.Fatal("test setup did not move the worktree HEAD")
+	}
+}
+
+// initTestRepo creates a committed repository and returns its path and HEAD.
+func initTestRepo(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if out, err := exec.Command("git", "init", "-b", "main", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "test")
+	run("commit", "--allow-empty", "-m", "init")
+	return dir, run("rev-parse", "HEAD")
+}
+
+func TestSubmitApprovedWritesWorkerAndReviewerReports(t *testing.T) {
+	st := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-1", SessionID: "mer-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunRunning},
+	}
+	reporter := &recordingReporter{}
+	svc := New(nil, st, WithApprovalReporter(reporter))
+
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictApproved, "looks good", "9"); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(reporter.notes) != 2 || !strings.HasPrefix(reporter.notes[0], "worker: ") || !strings.HasPrefix(reporter.notes[1], "reviewer: ") {
+		t.Fatalf("notes = %#v, want worker: and reviewer: done reports", reporter.notes)
+	}
+	if reporter.states[0] != domain.ReportDone || reporter.states[1] != domain.ReportDone || reporter.sessions[0] != "mer-1" || reporter.sessions[1] != "mer-1" {
+		t.Fatalf("reports = notes %#v states %#v sessions %#v, want done reports on the worker session", reporter.notes, reporter.states, reporter.sessions)
+	}
+	if !strings.Contains(reporter.notes[0], "https://github.com/o/r/pull/1") || !strings.Contains(reporter.notes[0], "sha1") {
+		t.Fatalf("worker note = %q, want PR and head", reporter.notes[0])
+	}
+
+	reporter.notes = nil
+	st.run.Status, st.run.Verdict = domain.ReviewRunComplete, domain.VerdictApproved
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictApproved, "looks good", "9"); err != nil {
+		t.Fatalf("resubmit: %v", err)
+	}
+	if len(reporter.notes) != 0 {
+		t.Fatalf("resubmit wrote reports again: %#v", reporter.notes)
+	}
+}
+
+func TestSubmitChangesRequestedWritesNoApprovalReports(t *testing.T) {
+	st := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-1", SessionID: "mer-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunRunning},
+	}
+	reporter := &recordingReporter{}
+	svc := New(nil, st, WithApprovalReporter(reporter))
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictChangesRequested, "fix the nil check", ""); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(reporter.notes) != 0 {
+		t.Fatalf("changes_requested wrote reports: %#v", reporter.notes)
+	}
+}
+
 func TestSubmitRecordsTheResultWithoutASeparateDelivery(t *testing.T) {
 	st := &fakeStore{
 		ok:  true,

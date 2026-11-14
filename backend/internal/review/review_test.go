@@ -37,10 +37,14 @@ type fakeStore struct {
 	// insertErr instead of recording the caller's run.
 	insertErr              error
 	insertErrWinnerAtFront bool
-	recoverableReviews     []domain.Review
-	recoverableReviewsErr  error
-	recoveryErrors         map[string]string
-	settledReviewIDs       []string
+	// enforceTestPass makes HasReviewTestPass consult testPasses. Existing
+	// tests leave it false so a missing record does not refuse every trigger.
+	enforceTestPass       bool
+	testPasses            map[string]bool
+	recoverableReviews    []domain.Review
+	recoverableReviewsErr error
+	recoveryErrors        map[string]string
+	settledReviewIDs      []string
 }
 
 func (f *fakeStore) UpsertReview(_ context.Context, r domain.Review) error {
@@ -325,6 +329,17 @@ func (f *fakeStore) ListRecoverableChatReviews(context.Context) ([]domain.Review
 	return f.recoverableReviews, f.recoverableReviewsErr
 }
 
+func (f *fakeStore) HasReviewTestPass(_ context.Context, id domain.SessionID, sha string) (bool, error) {
+	if !f.enforceTestPass {
+		return true, nil
+	}
+	if f.testPasses == nil {
+		return false, nil
+	}
+	_, ok := f.testPasses[string(id)+"\x00"+sha]
+	return ok, nil
+}
+
 func (f *fakeStore) RecordReviewChatControllerError(_ context.Context, id, message string, _ time.Time) (bool, error) {
 	if f.recoveryErrors == nil {
 		f.recoveryErrors = make(map[string]string)
@@ -571,6 +586,9 @@ func seedReviewWorker(t *testing.T, st *sqlite.Store, worker domain.SessionRecor
 	if _, err := st.CreateSession(ctx, worker); err != nil {
 		t.Fatalf("create worker session: %v", err)
 	}
+	if err := st.RecordReviewTestPass(ctx, worker.ID, "sha1", time.Now().UTC()); err != nil {
+		t.Fatalf("record test pass: %v", err)
+	}
 }
 
 // --- tests ---
@@ -625,7 +643,7 @@ func TestReviewerOperationsWaitForStartupRecovery(t *testing.T) {
 func TestTriggerSpawnsNewReviewerAndRecordsRunAfterLaunch(t *testing.T) {
 	store := &fakeStore{}
 	launcher := &fakeLauncher{handle: "review-mer-1"}
-	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{cfg: domain.ProjectConfig{Env: map[string]string{"PROJECT_TOKEN": "review-value"}}}, launcher)
+	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{cfg: domain.ProjectConfig{Env: map[string]string{"PROJECT_TOKEN": "review-value"}, ReviewBrief: "Focus on auth regressions"}}, launcher)
 
 	res, err := trigger(context.Background(), eng, "mer-1", "", domain.AgentConfig{})
 	if err != nil {
@@ -646,8 +664,56 @@ func TestTriggerSpawnsNewReviewerAndRecordsRunAfterLaunch(t *testing.T) {
 	if launcher.gotSpec.ProjectEnv["PROJECT_TOKEN"] != "review-value" {
 		t.Fatal("review launch did not receive current project environment")
 	}
+	if launcher.gotSpec.ReviewBrief != "Focus on auth regressions" {
+		t.Fatalf("review launch brief = %q, want %q", launcher.gotSpec.ReviewBrief, "Focus on auth regressions")
+	}
 	if len(store.runs) != 1 || store.review == nil || store.review.ReviewerHandleID != "review-mer-1" {
 		t.Fatalf("persisted review=%+v runs=%+v", store.review, store.runs)
+	}
+}
+
+func TestTriggerRefusesHeadWithoutRecordedTestPass(t *testing.T) {
+	store := &fakeStore{enforceTestPass: true}
+	launcher := &fakeLauncher{handle: "review-mer-1"}
+	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{}, launcher)
+
+	_, err := trigger(context.Background(), eng, "mer-1", "", domain.AgentConfig{})
+	if !errors.Is(err, ErrTestsNotPassed) {
+		t.Fatalf("Trigger error = %v, want ErrTestsNotPassed", err)
+	}
+	if launcher.spawned || len(store.runs) != 0 {
+		t.Fatalf("refused trigger still launched: spawned=%v runs=%d", launcher.spawned, len(store.runs))
+	}
+
+	store.testPasses = map[string]bool{"mer-1\x00sha1": true}
+	res, err := trigger(context.Background(), eng, "mer-1", "", domain.AgentConfig{})
+	if err != nil {
+		t.Fatalf("Trigger after pass: %v", err)
+	}
+	if !res.Created || !launcher.spawned {
+		t.Fatalf("expected launch after recorded pass: %+v spawned=%v", res, launcher.spawned)
+	}
+}
+
+// A re-notified (already live) reviewer must receive the current project brief
+// just like a freshly spawned reviewer.
+func TestTriggerNotifyCarriesProjectReviewBrief(t *testing.T) {
+	store := &fakeStore{
+		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, ReviewerHandleID: "review-mer-1", AgentSessionID: "native-reviewer-1"},
+		runs:   []domain.ReviewRun{{ID: "run-0", SessionID: "mer-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha0", Status: domain.ReviewRunComplete}},
+	}
+	launcher := &fakeLauncher{alive: true}
+	worker := liveWorker()
+	eng := newEngineForTest(store, fakeSessions{rec: worker, ok: true}, prAt("sha1"), fakeProjects{cfg: domain.ProjectConfig{ReviewBrief: "Check the migration"}}, launcher)
+
+	if _, err := trigger(context.Background(), eng, worker.ID, "", domain.AgentConfig{}); err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	if launcher.spawned || !launcher.notified {
+		t.Fatalf("expected a live reviewer to be notified: %+v", launcher)
+	}
+	if launcher.gotSpec.ReviewBrief != "Check the migration" {
+		t.Fatalf("notify spec brief = %q, want %q", launcher.gotSpec.ReviewBrief, "Check the migration")
 	}
 }
 
@@ -3293,6 +3359,9 @@ func TestArchiveReviewerHidesSurfaceAndPreservesHistoryUntilNewReview(t *testing
 			}
 			if nextLauncher.spawned || nextLauncher.restored {
 				t.Fatal("archived reviewer resurrected during recovery")
+			}
+			if err := store.RecordReviewTestPass(ctx, worker.ID, "sha3", now); err != nil {
+				t.Fatal(err)
 			}
 			result, err := trigger(ctx, next, worker.ID, review.Harness, domain.AgentConfig{})
 			if err != nil || !result.Created || result.ReviewerSurface.ReviewID != review.ID {

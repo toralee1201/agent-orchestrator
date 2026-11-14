@@ -102,6 +102,10 @@ func (f *fakeReviewService) Submit(context.Context, domain.SessionID, string, do
 	return domain.ReviewRun{}, nil
 }
 
+func (f *fakeReviewService) RecordTestPass(context.Context, domain.SessionID, string) error {
+	return nil
+}
+
 func (f *fakeReviewService) ApplyReviewActivitySignal(_ context.Context, reviewSessionID string, signal reviewsvc.ActivitySignal) error {
 	f.activityID = reviewSessionID
 	f.activitySignal = signal

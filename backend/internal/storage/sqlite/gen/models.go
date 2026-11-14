@@ -715,6 +715,12 @@ type ReviewRun struct {
 	TriggerSource    domain.ReviewTriggerSource
 }
 
+type ReviewTestPass struct {
+	SessionID string
+	TargetSha string
+	PassedAt  time.Time
+}
+
 type Session struct {
 	ID                               domain.SessionID
 	ProjectID                        *domain.ProjectID

@@ -148,11 +148,17 @@ again: the command exits 1 with `REVIEW_ALREADY_RUNNING` or
 `--rerun`. The trigger re-reads the PR from the provider first; if you
 just pushed and it still says already reviewed, wait a few seconds and retry. The same reviewer agent never runs twice on one head at the same time.
 
+Record the head's unit-test pass with `ao review tests-passed --sha <head>`
+before triggering. The daemon runs the project's unit-test command and records
+the pass only on exit 0, so a failing suite leaves the head untriggerable. A
+trigger for a head with no recorded pass is refused.
+
 By default the command turns on the worker session's review auto-inject. The
 reviewer posts an inline GitHub comment for each change it requires, and Orchestrator
 forwards those comments to the worker like any other review comments. An
-approval adds no comments, so check the verdict with `ao review ls`. If a run
-shows `failed` or `cancelled`, trigger again; nothing else reports it.
+approval adds no comments. Orchestrator writes the worker and reviewer done
+reports itself; do not run `ao report --done` for that verdict. If a run
+shows `failed` or `cancelled`, trigger again.
 
 **Examples:**
 
@@ -169,4 +175,38 @@ ao review trigger mer-3 --agent codex --model gpt-5.5
 ```bash
 # Add a second opinion on the same commit while the first reviewer runs
 ao review trigger --agent claude-code --rerun
+```
+
+---
+
+### ao review tests-passed
+
+Run the project's `unitTestCommand` in this worker's worktree and record the
+pass for one PR head. `AO_SESSION_ID` is required.
+
+The daemon, not the worker, decides the outcome: it runs the command in the
+worker's worktree, and records the pass only when the command exits 0. A failing
+suite records nothing and the command fails with the tail of the output, so fix
+the tests and rerun. The worktree must still be on `--sha`, because a pass for a
+head the worktree is not on would let a trigger review an untested commit. A
+project with no `unitTestCommand` refuses the call; set one with
+`ao project set-config <id> --unit-test-command "<command>"`.
+
+`ao review trigger` refuses a head that has no record.
+
+**Syntax:**
+```
+ao review tests-passed --sha <head>
+```
+
+**Flags:**
+
+| Flag | Meaning | Default / Required |
+|---|---|---|
+| `--sha string` | PR head commit to test; the pass is recorded only when its tests exit 0 | Required |
+
+**Example:**
+
+```bash
+ao review tests-passed --sha abc123def
 ```

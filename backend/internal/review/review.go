@@ -35,6 +35,9 @@ var (
 	// ErrPROwnedElsewhere means a named PR belongs to another active session,
 	// which a review trigger never takes over.
 	ErrPROwnedElsewhere = fmt.Errorf("%w: pull request owned by another session", ErrConflict)
+	// ErrTestsNotPassed means ao review trigger refused because this head has no
+	// recorded passing unit-test result.
+	ErrTestsNotPassed = fmt.Errorf("%w: unit tests have not been recorded as passed for this head; run ao review tests-passed --sha <head>", ErrInvalid)
 	// ErrHarnessInstallActive means the reviewer's harness is being installed,
 	// updated or removed, so a reviewer cannot start on it now.
 	ErrHarnessInstallActive = fmt.Errorf("%w: reviewer harness is being updated", ErrConflict)
@@ -74,6 +77,9 @@ type Store interface {
 	ListRunningReviewRunsBySession(ctx stdctx.Context, id domain.SessionID) ([]domain.ReviewRun, error)
 	ListRecoverableChatReviews(ctx stdctx.Context) ([]domain.Review, error)
 	RecordReviewChatControllerError(ctx stdctx.Context, id, message string, now time.Time) (bool, error)
+	// HasReviewTestPass reports whether the worker recorded a passing unit-test
+	// run for this PR head. A missing record refuses ao review trigger.
+	HasReviewTestPass(ctx stdctx.Context, id domain.SessionID, sha string) (bool, error)
 }
 
 // Sessions resolves the worker session under review.
@@ -457,6 +463,41 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		}
 	}
 
+	reviewDue := func(reviewState PRReviewState) bool {
+		eligible := reviewState.Status == ReviewStateNeedsReview || (source != domain.ReviewTriggerAuto && reviewState.Status == ReviewStateChangesRequested) || (opts.Rerun && reviewState.Status != ReviewStateIneligible)
+		if source == domain.ReviewTriggerAuto && autoReviewHeadBlocked(runs, reviewState.PRURL, reviewState.TargetSHA, harness) {
+			eligible = false
+		}
+		switch {
+		case reviewState.Status == ReviewStateIneligible:
+			return false
+		case opts.Rerun:
+			if headRunningForHarness(runs, reviewState.PRURL, reviewState.TargetSHA, harness) {
+				return false
+			}
+		case opts.RejectReviewedHead:
+			if headHasReview(runs, reviewState.PRURL, reviewState.TargetSHA) {
+				return false
+			}
+		case !eligible && !secondOpinionWanted(reviewState, hasHarnessOverride, secondOpinionOverride, harness):
+			return false
+		}
+		return true
+	}
+	for _, reviewState := range reviews {
+		if !reviewDue(reviewState) {
+			continue
+		}
+		sha := strings.TrimSpace(reviewState.TargetSHA)
+		passed, err := e.store.HasReviewTestPass(ctx, workerID, sha)
+		if err != nil {
+			return TriggerResult{}, err
+		}
+		if sha == "" || !passed {
+			return TriggerResult{}, fmt.Errorf("%w: head %s", ErrTestsNotPassed, sha)
+		}
+	}
+
 	now := e.clock()
 	reviewRow, err = e.upsertReview(ctx, worker, harness, reviewRow.ReviewerHandleID, reviewRow.AgentSessionID, reviewRow.ReviewerLaunchID, domain.ActivityActive, now)
 	if err != nil {
@@ -477,26 +518,11 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		// another agent is precisely a request for a second opinion on this commit,
 		// so refusing it makes the reviewer choice inert exactly when it is most
 		// useful. Ineligible PRs stay excluded: nothing can review those.
-		eligible := reviewState.Status == ReviewStateNeedsReview || (source != domain.ReviewTriggerAuto && reviewState.Status == ReviewStateChangesRequested) || (opts.Rerun && reviewState.Status != ReviewStateIneligible)
-		if source == domain.ReviewTriggerAuto && autoReviewHeadBlocked(runs, reviewState.PRURL, reviewState.TargetSHA, harness) {
-			eligible = false
-		}
-		switch {
-		case reviewState.Status == ReviewStateIneligible:
-			continue
-		case opts.Rerun:
-			// An explicit rerun reviews the head again, except that one reviewer
-			// is never started twice on the same head concurrently.
-			if headRunningForHarness(runs, reviewState.PRURL, reviewState.TargetSHA, harness) {
-				continue
-			}
-		case opts.RejectReviewedHead:
-			// Any pass on this head, running or complete, by any reviewer, means
-			// it is not due; the caller asked to hear about that, not reuse it.
-			if headHasReview(runs, reviewState.PRURL, reviewState.TargetSHA) {
-				continue
-			}
-		case !eligible && !secondOpinionWanted(reviewState, hasHarnessOverride, secondOpinionOverride, harness):
+		// An explicit rerun reviews the head again, except that one reviewer
+		// is never started twice on the same head concurrently. RejectReviewedHead
+		// skips a head that already has any pass. The test-pass gate above already
+		// refused a due head with no recorded unit-test pass.
+		if !reviewDue(reviewState) {
 			continue
 		}
 		if hasConfigOverride {
@@ -620,6 +646,10 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 	queueRuns = append(queueRuns, created...)
 	queue := reviewQueue(queueRuns)
 	launchRun := queueRuns[0]
+	reviewBrief, err := e.projectReviewBrief(ctx, worker.ProjectID)
+	if err != nil {
+		return TriggerResult{}, failRuns(0, err)
+	}
 	launchAgentSessionID := reviewRow.AgentSessionID
 	if hasConfigOverride || selectedMode == domain.ReviewerInterfaceChat {
 		launchAgentSessionID = ""
@@ -676,6 +706,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		}
 		launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, launchAgentSessionID, launchID)
 		launchSpec.ProjectEnv = projectEnv
+		launchSpec.ReviewBrief = reviewBrief
 		launchSpec.InterfaceMode = selectedMode
 		launchSpec.DeferInitialMessage = deferInitialMessage
 		if selectedMode == domain.ReviewerInterfaceChat && !hasConfigOverride {
@@ -694,6 +725,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		}
 	} else {
 		launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, reviewRow.AgentSessionID, reviewRow.ReviewerLaunchID)
+		launchSpec.ReviewBrief = reviewBrief
 		launchSpec.InterfaceMode = selectedMode
 		if err := e.launcher.Notify(ctx, handleID, launchSpec); err != nil {
 			return TriggerResult{}, failRuns(0, fmt.Errorf("notify reviewer: %w", err))
@@ -749,6 +781,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		previousStopped = true
 		if deferInitialMessage {
 			launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, persistedAgentSessionID, reviewRow.ReviewerLaunchID)
+			launchSpec.ReviewBrief = reviewBrief
 			launchSpec.InterfaceMode = selectedMode
 			if err := e.launcher.Notify(ctx, handleID, launchSpec); err != nil {
 				return TriggerResult{}, rollbackReplacement(fmt.Errorf("notify replacement reviewer: %w", err))
@@ -1989,6 +2022,19 @@ func (e *Engine) projectEnv(ctx stdctx.Context, id domain.ProjectID) (map[string
 		return nil, err
 	}
 	return project.Config.Env, nil
+}
+
+// projectReviewBrief returns the project's orchestrator review brief, copied
+// onto every launch/notify spec so the reviewer prompt can include it.
+func (e *Engine) projectReviewBrief(ctx stdctx.Context, id domain.ProjectID) (string, error) {
+	if e.projects == nil {
+		return "", nil
+	}
+	project, ok, err := e.projects.GetProject(ctx, string(id))
+	if err != nil || !ok {
+		return "", err
+	}
+	return project.Config.ReviewBrief, nil
 }
 
 func (e *Engine) upsertReview(ctx stdctx.Context, worker domain.SessionRecord, harness domain.ReviewerHarness, handleID, agentSessionID, reviewerLaunchID string, activityState domain.ActivityState, now time.Time) (domain.Review, error) {

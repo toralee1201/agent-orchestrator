@@ -117,6 +117,12 @@ func (c *commandContext) postJSON(ctx context.Context, path string, body, out an
 // hanging up cancels the call and its Setup. Interrupting the command closes
 // the connection, which cancels it on the daemon.
 func (c *commandContext) postSetupJSON(ctx context.Context, path string, body, out any) error {
+	return c.postUnboundedJSON(ctx, path, body, out)
+}
+
+// postUnboundedJSON is postJSON with no client timeout for a call the daemon
+// bounds itself, such as one that runs the project's unit-test command.
+func (c *commandContext) postUnboundedJSON(ctx context.Context, path string, body, out any) error {
 	return c.doJSONPathWithHeadersAndTimeout(ctx, http.MethodPost, "/api/v1/"+path, body, out, nil, 0)
 }
 

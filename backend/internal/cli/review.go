@@ -157,6 +157,37 @@ func newReviewCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newReviewSubmitCommand(ctx))
 	cmd.AddCommand(newReviewCancelCommand(ctx))
 	cmd.AddCommand(newReviewTriggerCommand(ctx))
+	cmd.AddCommand(newReviewTestsPassedCommand(ctx))
+	return cmd
+}
+
+func newReviewTestsPassedCommand(ctx *commandContext) *cobra.Command {
+	var sha string
+	cmd := &cobra.Command{
+		Use:   "tests-passed",
+		Short: "Run this worker's unit tests and record a pass for its PR head",
+		Long: `Run the project's unitTestCommand in this worker's worktree and record the
+pass for --sha only when it exits 0. A failing run records nothing, and
+ao review trigger refuses a head with no recorded pass.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			sessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
+			if sessionID == "" {
+				return usageError{errors.New("usage: AO_SESSION_ID is required")}
+			}
+			sha = strings.TrimSpace(sha)
+			if sha == "" {
+				return usageError{errors.New("usage: --sha is required")}
+			}
+			path := "sessions/" + url.PathEscape(sessionID) + "/reviews/test-pass"
+			// The daemon runs the suite, so this call outlasts the default
+			// client timeout; the daemon bounds the run itself.
+			return ctx.postUnboundedJSON(cmd.Context(), path, struct {
+				SHA string `json:"sha"`
+			}{SHA: sha}, nil)
+		},
+	}
+	cmd.Flags().StringVar(&sha, "sha", "", "PR head commit to test; the daemon records the pass only when its tests exit 0 (required)")
 	return cmd
 }
 

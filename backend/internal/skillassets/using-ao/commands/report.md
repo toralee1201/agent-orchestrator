@@ -49,6 +49,10 @@ user-authorized scope.
 
 `--pr-created` and `--pr-reviewed` accept complete GitHub PR or GitLab MR URLs.
 
+A native reviewer does not run `ao report`. When a review submission is
+approved, the review service writes the `worker:` and `reviewer:` done reports
+on the worker session itself.
+
 `--needs-input` requests immediate non-interrupting delivery. `--stuck`
 requests immediate delivery plus a rate-limited interrupt. Informational work
 batches for up to one hour, while the first done report opens a fixed one

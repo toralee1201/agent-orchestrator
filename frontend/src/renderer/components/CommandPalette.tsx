@@ -39,6 +39,7 @@ import {
 	commandPaletteFileSearchQueryOptions,
 } from "../lib/command-palette-file-search";
 import { iconForCommand } from "../lib/command-palette-icons";
+import { startProblemReport } from "../lib/report-problem";
 import { buildSettingsCommands, buildShortcutCommands } from "../lib/palette-registry";
 import { useSplitPanesEnabled } from "../lib/split-panes";
 import { isDialogOrMenuOpen } from "../lib/dom-selectors";
@@ -59,6 +60,7 @@ import {
 	workerSessions,
 } from "../types/workspace";
 import { useUiStore } from "../stores/ui-store";
+import { useSessionImportStore } from "../stores/session-import-store";
 import { runAppShortcut, useAppShortcut } from "../hooks/useAppShortcut";
 import { CreateProjectFlow } from "./CreateProjectFlow";
 import { requestOpenShareLink } from "./OpenShareLinkDialog";
@@ -106,7 +108,7 @@ export const CommandPalette = memo(function CommandPalette() {
 	const cloudReady = cloud.ready;
 	const restoreSessionById = useRestoreSession();
 	const params = useParams({ strict: false }) as { hostId?: string; projectId?: string; sessionId?: string };
-	const { cloneProject, createProject, initializeProjectRepository } = useShell();
+	const { cloneProject, createProject, daemonStatus, initializeProjectRepository } = useShell();
 	const resolvedTheme = useUiStore((s) => s.resolvedTheme);
 	const setThemePreference = useUiStore((s) => s.setThemePreference);
 	const isOpen = useUiStore((s) => s.isCommandPaletteOpen);
@@ -673,6 +675,13 @@ export const CommandPalette = memo(function CommandPalette() {
 						closePalette();
 						requestOpenShareLink();
 						break;
+					case "report-problem": {
+						const failure = await startProblemReport(daemonStatus.state);
+						if (failure) throw new Error(failure);
+						if (!isCurrentRun()) break;
+						closePalette();
+						break;
+					}
 				case "open-pr":
 					await aoBridge.app.openExternal(action.url);
 					if (!isCurrentRun()) break;
@@ -737,6 +746,11 @@ export const CommandPalette = memo(function CommandPalette() {
 					closePalette();
 					useUiStore.getState().openGlobalSettings(action.section, action.focus ? { focusSetting: action.focus } : undefined);
 					break;
+				case "open-session-import":
+					closePalette();
+					if (action.projectId) useSessionImportStore.getState().openProjectImport(action.projectId);
+					else useSessionImportStore.getState().openFolderImport();
+					break;
 				case "run-shortcut": {
 					closePalette();
 					// After the palette has closed, so the action sees the screen
@@ -770,13 +784,15 @@ export const CommandPalette = memo(function CommandPalette() {
 							await openOrchestrator(action.projectId, isCurrentRun);
 							break;
 					case "open-archive": {
-						// The project's board opens its archive once it is on screen.
-						useUiStore.getState().requestArchiveOpen(action.projectId, params.hostId);
-						if (params.hostId) {
-							void navigate({ to: "/host/$hostId/project/$projectId", params: { hostId: params.hostId, projectId: action.projectId } });
-						} else {
-							void navigate({ to: "/projects/$projectId", params: { projectId: action.projectId } });
-						}
+						// Over the current page, with no navigation. The palette's own
+						// focus goes with it, so the modal returns to where the palette
+						// was opened from (a composer, a terminal) when it closes.
+						const returnFocus = returnFocusRef.current;
+						useUiStore.getState().openArchive({
+							projectId: action.projectId,
+							hostId: params.hostId,
+							returnFocus: returnFocus instanceof HTMLElement ? returnFocus : null,
+						});
 						closePalette();
 						break;
 					}
@@ -790,7 +806,7 @@ export const CommandPalette = memo(function CommandPalette() {
 				}
 			}
 		},
-		[findChatWorkspace, navigate, navigateToTarget, closePalette, toggleTheme, openOrchestrator, resumeSession, pushView, blockedByRestart, openNewProject, queryClient, t, params.hostId, params.sessionId, fileSessionRoute, sessionRoute, workspaces],
+		[daemonStatus.state, findChatWorkspace, navigate, navigateToTarget, closePalette, toggleTheme, openOrchestrator, resumeSession, pushView, blockedByRestart, openNewProject, queryClient, t, params.hostId, params.sessionId, fileSessionRoute, sessionRoute, workspaces],
 	);
 
 	const onSelectItem = useCallback(
@@ -1079,6 +1095,7 @@ function opensModal(action: NonNullable<CommandItemModel["action"]>, taskOpensMo
 		case "open-new-task":
 			return taskOpensModal;
 		case "open-new-project":
+		case "open-session-import":
 		case "open-archive":
 		case "open-shared-link":
 		case "open-settings-section":

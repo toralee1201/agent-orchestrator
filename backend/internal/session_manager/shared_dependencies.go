@@ -374,17 +374,12 @@ func (r *contextReader) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
 }
 
-// copyLinkedFile streams the file a link finally points at into the copy. An
-// externally installed dependency can carry a large binary; reading it whole
-// would spike the daemon's memory, and the write could not be interrupted once
-// started. The stream checks the request between chunks, so a cancelled run
-// stops mid-file instead of after it.
-func copyLinkedFile(ctx context.Context, destination, linkPath string, perm os.FileMode) error {
-	in, err := os.Open(destination)
-	if err != nil {
-		return fmt.Errorf("dependency link %s: %w", linkPath, err)
-	}
-	defer func() { _ = in.Close() }()
+// copyLinkedFile streams the content a link finally points at into the copy.
+// An externally installed dependency can carry a large binary; reading it
+// whole would spike the daemon's memory, and the write could not be
+// interrupted once started. The stream checks the request between chunks, so
+// a cancelled run stops mid-file instead of after it.
+func copyLinkedFile(ctx context.Context, in io.Reader, linkPath string, perm os.FileMode) error {
 	out, err := os.OpenFile(linkPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return fmt.Errorf("dependency link %s: %w", linkPath, err)
@@ -417,7 +412,12 @@ func (c dependencyTreeCopy) copyLinkDestination(ctx context.Context, destination
 		return fmt.Errorf("dependency link %s: %w", linkPath, err)
 	}
 	if !info.IsDir() {
-		return copyLinkedFile(ctx, destination, linkPath, info.Mode().Perm())
+		in, openErr := os.Open(destination)
+		if openErr != nil {
+			return fmt.Errorf("dependency link %s: %w", linkPath, openErr)
+		}
+		defer func() { _ = in.Close() }()
+		return copyLinkedFile(ctx, in, linkPath, info.Mode().Perm())
 	}
 	if previous, ok := visited[destination]; ok {
 		// The chain returned to a directory this copy already entered. Copying

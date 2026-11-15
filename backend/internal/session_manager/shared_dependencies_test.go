@@ -260,87 +260,83 @@ func TestCopyInstalledDependenciesCopiesLinksToOutsideDirectories(t *testing.T) 
 }
 
 // A link that finally points at one large external file is copied by
-// streaming: reading it whole would spike memory, and a copy that cannot be
-// interrupted would outlive the request. Cancellation must stop it mid-file.
-func TestCopyLinkDestinationStopsMidStreamWhenCancelled(t *testing.T) {
-	parent := t.TempDir()
-	source, target := filepath.Join(parent, "worker"), filepath.Join(parent, "snapshot")
-	if err := os.MkdirAll(target, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	external := filepath.Join(parent, "global-store", "big.bin")
-	if err := os.MkdirAll(filepath.Dir(external), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	// Far past any single read, so the copy cannot finish in one step and has
-	// to observe the cancellation between chunks.
-	const size = 256 << 20
-	file, err := os.OpenFile(external, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	chunk := make([]byte, 1<<20)
-	for written := 0; written < size; written += len(chunk) {
-		if _, writeErr := file.Write(chunk); writeErr != nil {
-			_ = file.Close()
-			t.Fatal(writeErr)
-		}
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	linkPath := filepath.Join(target, "node_modules", "big.bin")
-	if err := os.MkdirAll(filepath.Dir(linkPath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	trees := dependencyTreeCopy{sourceWorkspace: source, targetWorkspace: target}
+// streaming, and cancellation must stop it mid-file. The source synchronises
+// with the copy's own reads: it hands over one chunk, then holds the next read
+// until the request is cancelled, so the copy is guaranteed to be in flight
+// when it is cancelled and can never reach the end of the file first.
+func TestCopyLinkedFileStopsMidStreamWhenCancelled(t *testing.T) {
+	linkPath := filepath.Join(t.TempDir(), "big.bin")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// Cancel once the copy has written its first chunk. The copy signals
-	// completion and the wait is bounded, so a copy that finishes or fails
-	// before the watcher sees the file cannot leave the watcher spinning.
-	finished := make(chan struct{})
-	watchDone := make(chan struct{})
+	source := &heldReader{ctx: ctx, started: make(chan struct{}), chunk: make([]byte, 4096)}
 	go func() {
-		defer close(watchDone)
-		ticker := time.NewTicker(time.Millisecond)
-		defer ticker.Stop()
-		deadline := time.After(30 * time.Second)
-		for {
-			select {
-			case <-finished:
-				return
-			case <-deadline:
-				return
-			case <-ticker.C:
-				if info, statErr := os.Stat(linkPath); statErr == nil && info.Size() > 0 {
-					cancel()
-					return
-				}
-			}
-		}
+		<-source.started
+		cancel()
 	}()
 
-	err = trees.copyLinkDestination(ctx, external, linkPath, map[string]string{})
-	close(finished)
+	done := make(chan error, 1)
+	go func() {
+		done <- copyLinkedFile(ctx, source, linkPath, 0o600)
+	}()
+	var err error
 	select {
-	case <-watchDone:
+	case err = <-done:
 	case <-time.After(30 * time.Second):
-		t.Fatal("the watcher did not stop after the copy returned")
+		t.Fatal("copyLinkedFile did not stop after cancellation")
 	}
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("copyLinkDestination on a cancelled request = %v, want context.Canceled", err)
+		t.Fatalf("copyLinkedFile on a cancelled request = %v, want context.Canceled", err)
 	}
 	info, statErr := os.Stat(linkPath)
 	if statErr != nil {
 		t.Fatalf("partial copy missing: %v", statErr)
 	}
-	if info.Size() >= size {
-		t.Fatalf("copy completed despite cancellation (%d bytes)", info.Size())
+	if info.Size() == 0 || info.Size() > int64(2*len(source.chunk)) {
+		t.Fatalf("copy stopped at %d bytes, want one or two chunks of a partial copy", info.Size())
 	}
-	if info, statErr := os.Stat(external); statErr != nil || info.Size() != size {
-		t.Fatalf("source changed during the copy: info=%v err=%v", info, statErr)
+}
+
+// heldReader hands over one chunk, then holds every later read until the
+// request is cancelled. A copy reading from it can never finish on its own, so
+// a test can cancel it mid-stream without racing the filesystem.
+type heldReader struct {
+	ctx     context.Context
+	started chan struct{}
+	chunk   []byte
+	read    bool
+}
+
+func (r *heldReader) Read(p []byte) (int, error) {
+	if !r.read {
+		r.read = true
+		close(r.started)
+	} else {
+		<-r.ctx.Done()
+	}
+	return copy(p, r.chunk), nil
+}
+
+// The file branch of copyLinkDestination copies an external file's content in,
+// so the snapshot holds the bytes rather than a link back out to a live path.
+func TestCopyLinkDestinationCopiesAnExternalFile(t *testing.T) {
+	parent := t.TempDir()
+	source, target := filepath.Join(parent, "worker"), filepath.Join(parent, "snapshot")
+	external := filepath.Join(parent, "global-store", "index.js")
+	writeTestFile(t, external, "globally installed")
+	if err := os.MkdirAll(filepath.Join(target, "node_modules"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	trees := dependencyTreeCopy{sourceWorkspace: source, targetWorkspace: target}
+	linkPath := filepath.Join(target, "node_modules", "index.js")
+	if err := trees.copyLinkDestination(context.Background(), external, linkPath, map[string]string{}); err != nil {
+		t.Fatalf("copyLinkDestination: %v", err)
+	}
+	body, err := os.ReadFile(linkPath)
+	if err != nil {
+		t.Fatalf("copied file missing: %v", err)
+	}
+	if string(body) != "globally installed" {
+		t.Fatalf("copied content = %q, want the external file's content", body)
 	}
 }
 

@@ -2,12 +2,78 @@ package sessionmanager
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
+
+// A copy that outlives its request must stop: a cancelled run would otherwise
+// keep the daemon writing a dependency tree it will never use, and hold the
+// snapshot open against cleanup.
+func TestCopyInstalledDependenciesStopsWhenCancelled(t *testing.T) {
+	t.Run("already cancelled", func(t *testing.T) {
+		source, target := t.TempDir(), t.TempDir()
+		writeTestFile(t, filepath.Join(source, "node_modules", "left-pad", "index.js"), "pad")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := CopyInstalledDependencies(ctx, source, target)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("CopyInstalledDependencies on a cancelled request = %v, want context.Canceled", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(target, "node_modules")); !os.IsNotExist(statErr) {
+			t.Fatalf("cancelled copy still wrote the dependency folder: err=%v", statErr)
+		}
+	})
+
+	t.Run("cancelled mid copy", func(t *testing.T) {
+		source, target := t.TempDir(), t.TempDir()
+		if err := os.MkdirAll(filepath.Join(target, "packages", "app"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		const files = 2000
+		for i := 0; i < files; i++ {
+			writeTestFile(t, filepath.Join(source, "node_modules", "big", fmt.Sprintf("f%04d.js", i)), strings.Repeat("x", 8192))
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		watch := make(chan struct{})
+		go func() {
+			defer close(watch)
+			first := filepath.Join(target, "node_modules", "big", "f0000.js")
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				if _, statErr := os.Stat(first); statErr == nil {
+					cancel()
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}()
+
+		_, err := CopyInstalledDependencies(ctx, source, target)
+		<-watch
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("CopyInstalledDependencies = %v, want context.Canceled once the request was cancelled", err)
+		}
+		copied, readErr := os.ReadDir(filepath.Join(target, "node_modules", "big"))
+		if readErr != nil {
+			t.Fatalf("read the partial copy: %v", readErr)
+		}
+		if len(copied) >= files {
+			t.Fatalf("copied %d of %d files, want the copy to stop early", len(copied), files)
+		}
+	})
+}
 
 // An isolated checkout gets its own copy of the dependency folders the worker's
 // workspace already installed, with no installer running.

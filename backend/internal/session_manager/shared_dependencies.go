@@ -134,7 +134,7 @@ func (c dependencyTreeCopy) copyTree(ctx context.Context, source, target string)
 			return nil
 		}
 		if entry.Type().IsRegular() {
-			return copyDependencyFile(srcRoot, dstRoot, rel)
+			return copyDependencyFile(ctx, srcRoot, dstRoot, rel)
 		}
 		// Anything else may be a link. A Windows junction does not report the
 		// symlink bit and is not reported as a directory either, so a link is
@@ -142,7 +142,7 @@ func (c dependencyTreeCopy) copyTree(ctx context.Context, source, target string)
 		// following it would copy whatever it points at, and a workspace-local
 		// package junction would then bring the worker's uncommitted files in.
 		if _, linkErr := srcRoot.Readlink(rel); linkErr == nil {
-			if err := c.copyLink(srcRoot, rel, source, target); err != nil {
+			if err := c.copyLink(ctx, srcRoot, rel, source, target); err != nil {
 				return err
 			}
 			if entry.IsDir() {
@@ -163,7 +163,10 @@ func (c dependencyTreeCopy) copyTree(ctx context.Context, source, target string)
 // rather than at the worker's possibly-dirty checkout. A link pointing outside
 // both trees is not carried over as a link at all — its content is copied in,
 // so nothing inside the isolated checkout can reach back to a live workspace.
-func (c dependencyTreeCopy) copyLink(srcRoot *os.Root, rel, source, target string) error {
+func (c dependencyTreeCopy) copyLink(ctx context.Context, srcRoot *os.Root, rel, source, target string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	stored, err := srcRoot.Readlink(rel)
 	if err != nil {
 		return err
@@ -174,7 +177,7 @@ func (c dependencyTreeCopy) copyLink(srcRoot *os.Root, rel, source, target strin
 	if rebased, ok := c.rebase(resolved, linkPath, source, target); ok {
 		return createDependencyLink(linkPath, rebased)
 	}
-	return c.copyLinkDestination(resolved, linkPath, map[string]string{})
+	return c.copyLinkDestination(ctx, resolved, linkPath, map[string]string{})
 }
 
 // rebaseWorkspace maps a destination onto the copy when it names the source
@@ -330,8 +333,13 @@ func createDependencyLink(linkPath, stored string) error {
 
 // copyDependencyFile streams one file so a large dependency tree is never
 // buffered whole in memory. Both sides are root-scoped, so the paths cannot
-// escape the trees they were opened from.
-func copyDependencyFile(srcRoot, dstRoot *os.Root, rel string) error {
+// escape the trees they were opened from. The copy stops on cancellation: a
+// tree large enough to outlive the request must not keep copying after the
+// caller has given up on the snapshot.
+func copyDependencyFile(ctx context.Context, srcRoot, dstRoot *os.Root, rel string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	in, err := srcRoot.Open(rel)
 	if err != nil {
 		return err
@@ -345,11 +353,25 @@ func copyDependencyFile(srcRoot, dstRoot *os.Root, rel string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	if _, err := io.Copy(out, &contextReader{ctx: ctx, reader: in}); err != nil {
 		_ = out.Close()
 		return err
 	}
 	return out.Close()
+}
+
+// contextReader aborts a copy once the request is cancelled. Checking between
+// files alone would leave one very large file copying to completion.
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
 
 // copyLinkDestination copies what a link finally points at into linkPath. The
@@ -358,9 +380,12 @@ func copyDependencyFile(srcRoot, dstRoot *os.Root, rel string) error {
 // back out of the snapshot, and a directory link cannot be streamed as a file.
 // visited holds the destinations already entered on this path, which is what
 // stops a link cycle from recursing forever.
-func (c dependencyTreeCopy) copyLinkDestination(destination, linkPath string, visited map[string]string) error {
+func (c dependencyTreeCopy) copyLinkDestination(ctx context.Context, destination, linkPath string, visited map[string]string) error {
 	if rebased, ok := c.rebaseWorkspace(destination, linkPath); ok {
 		return createDependencyLink(linkPath, rebased)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	info, err := os.Stat(destination)
 	if err != nil {
@@ -402,6 +427,9 @@ func (c dependencyTreeCopy) copyLinkDestination(destination, linkPath string, vi
 		if walkErr != nil {
 			return walkErr
 		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if rel == "." {
 			return nil
 		}
@@ -412,7 +440,7 @@ func (c dependencyTreeCopy) copyLinkDestination(destination, linkPath string, vi
 			// names, and stop descending into it here because the copy of its
 			// target already covers that subtree.
 			nested := evalLinkTarget(resolveLinkTarget(stored, filepath.Dir(entryPath)))
-			if err := c.copyLinkDestination(nested, filepath.Join(linkPath, rel), visited); err != nil {
+			if err := c.copyLinkDestination(ctx, nested, filepath.Join(linkPath, rel), visited); err != nil {
 				return err
 			}
 			if entry.IsDir() {
@@ -423,6 +451,6 @@ func (c dependencyTreeCopy) copyLinkDestination(destination, linkPath string, vi
 		if entry.IsDir() {
 			return dstRoot.MkdirAll(rel, 0o750)
 		}
-		return copyDependencyFile(srcRoot, dstRoot, rel)
+		return copyDependencyFile(ctx, srcRoot, dstRoot, rel)
 	})
 }

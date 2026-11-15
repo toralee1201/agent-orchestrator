@@ -834,6 +834,70 @@ func TestUnitTestSnapshotsLiveUnderTheDataDirAndAreRemoved(t *testing.T) {
 	}
 }
 
+// A copy that outlives its request must not keep the daemon busy: cancellation
+// has to stop the dependency copy, fail the run, and leave no snapshot behind.
+func TestRecordTestPassStopsAndCleansUpWhenCancelled(t *testing.T) {
+	worktree, _ := initTestRepo(t)
+	writeFile(t, filepath.Join(worktree, ".gitignore"), "node_modules\n")
+	gitOutput(t, worktree, "add", ".gitignore")
+	gitOutput(t, worktree, "commit", "-m", "ignore node_modules")
+	head := gitOutput(t, worktree, "rev-parse", "HEAD")
+	// Enough files that the copy is still running when the request is
+	// cancelled; a single tiny folder would finish first.
+	for i := 0; i < 3000; i++ {
+		writeFile(t, filepath.Join(worktree, "node_modules", "big", fmt.Sprintf("f%04d.js", i)), strings.Repeat("x", 8192))
+	}
+
+	dataDir := t.TempDir()
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Path: worktree, Config: domain.ProjectConfig{UnitTestCommand: "exit 0"}},
+	}
+	svc := New(nil, st, WithDataDir(dataDir))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Cancel as soon as the snapshot exists and the dependency copy has started.
+	started := make(chan struct{})
+	go func() {
+		defer close(started)
+		pattern := filepath.Join(dataDir, "review-tests", "*", "snapshot", "node_modules", "big")
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+				cancel()
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	err := svc.RecordTestPass(ctx, "mer-1", head)
+	<-started
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RecordTestPass on a cancelled request = %v, want context.Canceled", err)
+	}
+	if _, ok := st.testPasses["mer-1\x00"+head]; ok {
+		t.Fatal("a cancelled run recorded a test pass")
+	}
+	leftovers, readErr := os.ReadDir(filepath.Join(dataDir, "review-tests"))
+	if readErr != nil {
+		t.Fatalf("snapshot root missing under the data dir: %v", readErr)
+	}
+	if len(leftovers) != 0 {
+		names := make([]string, 0, len(leftovers))
+		for _, entry := range leftovers {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("cancelled run left snapshots behind: %v", names)
+	}
+}
+
 // A run killed mid-suite never reaches its cleanup, so the next run has to
 // remove what it left behind while leaving in-flight snapshots alone.
 func TestCleanAbandonedUnitTestSnapshotsKeepsLiveRuns(t *testing.T) {

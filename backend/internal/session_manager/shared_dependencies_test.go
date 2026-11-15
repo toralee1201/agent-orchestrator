@@ -259,6 +259,91 @@ func TestCopyInstalledDependenciesCopiesLinksToOutsideDirectories(t *testing.T) 
 	}
 }
 
+// A link that finally points at one large external file is copied by
+// streaming: reading it whole would spike memory, and a copy that cannot be
+// interrupted would outlive the request. Cancellation must stop it mid-file.
+func TestCopyLinkDestinationStopsMidStreamWhenCancelled(t *testing.T) {
+	parent := t.TempDir()
+	source, target := filepath.Join(parent, "worker"), filepath.Join(parent, "snapshot")
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(parent, "global-store", "big.bin")
+	if err := os.MkdirAll(filepath.Dir(external), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Far past any single read, so the copy cannot finish in one step and has
+	// to observe the cancellation between chunks.
+	const size = 256 << 20
+	file, err := os.OpenFile(external, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := make([]byte, 1<<20)
+	for written := 0; written < size; written += len(chunk) {
+		if _, writeErr := file.Write(chunk); writeErr != nil {
+			_ = file.Close()
+			t.Fatal(writeErr)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	linkPath := filepath.Join(target, "node_modules", "big.bin")
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	trees := dependencyTreeCopy{sourceWorkspace: source, targetWorkspace: target}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel once the copy has written its first chunk. The copy signals
+	// completion and the wait is bounded, so a copy that finishes or fails
+	// before the watcher sees the file cannot leave the watcher spinning.
+	finished := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.After(30 * time.Second)
+		for {
+			select {
+			case <-finished:
+				return
+			case <-deadline:
+				return
+			case <-ticker.C:
+				if info, statErr := os.Stat(linkPath); statErr == nil && info.Size() > 0 {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	err = trees.copyLinkDestination(ctx, external, linkPath, map[string]string{})
+	close(finished)
+	select {
+	case <-watchDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the watcher did not stop after the copy returned")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("copyLinkDestination on a cancelled request = %v, want context.Canceled", err)
+	}
+	info, statErr := os.Stat(linkPath)
+	if statErr != nil {
+		t.Fatalf("partial copy missing: %v", statErr)
+	}
+	if info.Size() >= size {
+		t.Fatalf("copy completed despite cancellation (%d bytes)", info.Size())
+	}
+	if info, statErr := os.Stat(external); statErr != nil || info.Size() != size {
+		t.Fatalf("source changed during the copy: info=%v err=%v", info, statErr)
+	}
+}
+
 // A relative link that climbs out of the workspace resolves against the source
 // checkout, not the snapshot. Copied verbatim it would point at a path that may
 // not exist next to the snapshot, so the content is copied in instead.

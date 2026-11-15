@@ -123,15 +123,19 @@ func TestDependencyTreeCopyRebasesLinksThatNameTheWorkspace(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := trees.rebase(tc.stored, sourceDir, targetDir, treeSource, treeTarget)
+			resolved := resolveLinkTarget(tc.stored, sourceDir)
+			got, ok := trees.rebase(resolved, filepath.Join(targetDir, "app"), treeSource, treeTarget)
+			if !ok {
+				t.Fatalf("rebase(%q) reported no mapping, want %q", tc.stored, tc.want)
+			}
 			if got != tc.want {
 				t.Fatalf("rebase(%q) = %q, want %q", tc.stored, got, tc.want)
 			}
-			resolved := got
-			if !filepath.IsAbs(resolved) {
-				resolved = filepath.Join(targetDir, resolved)
+			mapped := got
+			if !filepath.IsAbs(mapped) {
+				mapped = filepath.Join(filepath.Join(targetDir, "app"), mapped)
 			}
-			if within, ok := withinTree(source, filepath.Clean(resolved)); ok {
+			if within, inWorker := withinTree(source, filepath.Clean(mapped)); inWorker {
 				t.Fatalf("rebased link %q resolves to %q inside the worker workspace", got, within)
 			}
 		})
@@ -147,9 +151,44 @@ func TestDependencyTreeCopyKeepsLinksOutsideBothTrees(t *testing.T) {
 	treeTarget := filepath.Join(target, "node_modules")
 	store := filepath.Join(t.TempDir(), "global-pnpm")
 
-	got := trees.rebase(store, treeSource, treeTarget, treeSource, treeTarget)
-	if got != store {
-		t.Fatalf("rebase(%q) = %q, want it kept verbatim", store, got)
+	resolved := resolveLinkTarget(store, treeSource)
+	if got, ok := trees.rebase(resolved, filepath.Join(treeTarget, "x"), treeSource, treeTarget); ok {
+		t.Fatalf("rebase(%q) = %q, want no mapping outside both trees", store, got)
+	}
+}
+
+// A link that names neither checkout is copied in rather than carried over as a
+// link, so the isolated checkout holds nothing that can reach a live path.
+func TestCopyInstalledDependenciesCopiesLinksToOutsideDirectories(t *testing.T) {
+	source, target := t.TempDir(), t.TempDir()
+	external := filepath.Join(t.TempDir(), "global-pnpm", "left-pad")
+	writeTestFile(t, filepath.Join(external, "index.js"), "globally installed")
+	if err := os.MkdirAll(filepath.Join(source, "node_modules"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(source, "node_modules", "left-pad")
+	if err := createDependencyLink(linkPath, external); err != nil {
+		t.Skipf("this host cannot create the link the test needs: %v", err)
+	}
+
+	if _, err := CopyInstalledDependencies(context.Background(), source, target); err != nil {
+		t.Fatalf("CopyInstalledDependencies: %v", err)
+	}
+	copied := filepath.Join(target, "node_modules", "left-pad")
+	root, err := os.OpenRoot(filepath.Join(target, "node_modules"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if stored, linkErr := root.Readlink("left-pad"); linkErr == nil {
+		t.Fatalf("copied dependency is a link to %q, want a real copy", stored)
+	}
+	body, err := os.ReadFile(filepath.Join(copied, "index.js"))
+	if err != nil {
+		t.Fatalf("copied dependency does not resolve: %v", err)
+	}
+	if string(body) != "globally installed" {
+		t.Fatalf("copied dependency content = %q, want the linked content", body)
 	}
 }
 

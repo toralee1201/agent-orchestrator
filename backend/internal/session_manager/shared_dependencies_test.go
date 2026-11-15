@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // An isolated checkout gets its own copy of the dependency folders the worker's
@@ -230,6 +231,142 @@ func TestCopyInstalledDependenciesCopiesRelativeLinksThatEscapeTheWorkspace(t *t
 	}
 	if string(body) != "shared store" {
 		t.Fatalf("copied dependency content = %q, want the linked content", body)
+	}
+}
+
+// A link can name an alias that is itself a link, with the chain finally
+// reaching the worker's package. Classifying only the first target would copy
+// uncommitted worker source into the snapshot, so the chain is followed and the
+// workspace destination is rebased onto the snapshot's committed files.
+func TestCopyInstalledDependenciesFollowsALinkChainToTheWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	source, target := filepath.Join(parent, "worker"), filepath.Join(parent, "snapshot")
+	writeTestFile(t, filepath.Join(source, "packages", "app", "index.js"), "worker uncommitted")
+	writeTestFile(t, filepath.Join(target, "packages", "app", "index.js"), "snapshot committed")
+	alias := filepath.Join(parent, "alias")
+	if err := createDependencyLink(alias, filepath.Join(source, "packages", "app")); err != nil {
+		t.Skipf("this host cannot create the alias the test needs: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(source, "node_modules"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(source, "node_modules", "app")
+	if err := createDependencyLink(linkPath, alias); err != nil {
+		t.Skipf("this host cannot create the link the test needs: %v", err)
+	}
+
+	if _, err := CopyInstalledDependencies(context.Background(), source, target); err != nil {
+		t.Fatalf("CopyInstalledDependencies: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(target, "node_modules", "app", "index.js"))
+	if err != nil {
+		t.Fatalf("copied package link does not resolve: %v", err)
+	}
+	if string(body) != "snapshot committed" {
+		t.Fatalf("link chain resolved to %q, want the snapshot's committed content", body)
+	}
+}
+
+// An externally installed dependency can contain its own links. They are
+// content of that dependency, so their targets are copied too: a nested
+// directory link cannot be streamed as a file, and leaving it in place would
+// point the suite outside the snapshot.
+func TestCopyInstalledDependenciesCopiesNestedLinksInExternalDependencies(t *testing.T) {
+	parent := t.TempDir()
+	source, target := filepath.Join(parent, "worker"), filepath.Join(parent, "snapshot")
+	external := filepath.Join(parent, "global-pnpm", "pkg")
+	writeTestFile(t, filepath.Join(external, "index.js"), "pkg entry")
+	writeTestFile(t, filepath.Join(parent, "global-pnpm", "shared", "util.js"), "shared util")
+	writeTestFile(t, filepath.Join(external, "linked-file.js"), "real file")
+	if err := os.MkdirAll(filepath.Join(source, "node_modules"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := createDependencyLink(filepath.Join(external, "shared"), filepath.Join("..", "shared")); err != nil {
+		t.Skipf("this host cannot create the nested directory link: %v", err)
+	}
+	fileLinkable := createDependencyLink(filepath.Join(external, "file.js"), "linked-file.js") == nil
+	if err := createDependencyLink(filepath.Join(source, "node_modules", "pkg"), external); err != nil {
+		t.Skipf("this host cannot create the link the test needs: %v", err)
+	}
+
+	if _, err := CopyInstalledDependencies(context.Background(), source, target); err != nil {
+		t.Fatalf("CopyInstalledDependencies: %v", err)
+	}
+	copied := filepath.Join(target, "node_modules", "pkg")
+	root, err := os.OpenRoot(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if stored, linkErr := root.Readlink("shared"); linkErr == nil {
+		t.Fatalf("nested directory link was kept as a link to %q, want a copy", stored)
+	}
+	if body, readErr := os.ReadFile(filepath.Join(copied, "shared", "util.js")); readErr != nil || string(body) != "shared util" {
+		t.Fatalf("nested directory link content = %q, err = %v, want the copied subtree", body, readErr)
+	}
+	if !fileLinkable {
+		t.Log("this host cannot create a file link; only the nested directory link was checked")
+		return
+	}
+	if body, readErr := os.ReadFile(filepath.Join(copied, "file.js")); readErr != nil || string(body) != "real file" {
+		t.Fatalf("nested file link content = %q, err = %v, want the copied file", body, readErr)
+	}
+}
+
+// A dependency that links back to a directory already being copied must not
+// recurse forever. The loop becomes a link to the ancestor's copy, so the
+// layout is preserved and nothing points at a live path.
+func TestCopyInstalledDependenciesClosesACycleWithAnIsolatedLink(t *testing.T) {
+	parent := t.TempDir()
+	source, target := filepath.Join(parent, "worker"), filepath.Join(parent, "snapshot")
+	external := filepath.Join(parent, "global-pnpm", "pkg")
+	writeTestFile(t, filepath.Join(external, "index.js"), "pkg entry")
+	if err := os.MkdirAll(filepath.Join(source, "node_modules"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// pkg/loop -> pkg, a cycle that a naive walk would follow forever.
+	if err := createDependencyLink(filepath.Join(external, "loop"), "."); err != nil {
+		t.Skipf("this host cannot create the cycle the test needs: %v", err)
+	}
+	if err := createDependencyLink(filepath.Join(source, "node_modules", "pkg"), external); err != nil {
+		t.Skipf("this host cannot create the link the test needs: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, copyErr := CopyInstalledDependencies(context.Background(), source, target)
+		done <- copyErr
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CopyInstalledDependencies: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("CopyInstalledDependencies did not finish; the cycle was followed")
+	}
+
+	copied := filepath.Join(target, "node_modules", "pkg")
+	body, err := os.ReadFile(filepath.Join(copied, "index.js"))
+	if err != nil {
+		t.Fatalf("copied dependency does not resolve: %v", err)
+	}
+	if string(body) != "pkg entry" {
+		t.Fatalf("copied dependency content = %q, want the original entry", body)
+	}
+	if _, err := os.Stat(filepath.Join(copied, "loop", "index.js")); err != nil {
+		t.Fatalf("cycle link does not resolve inside the snapshot: %v", err)
+	}
+	if target, err := filepath.EvalSymlinks(filepath.Join(copied, "loop")); err == nil {
+		if within, ok := withinTree(external, target); ok {
+			t.Fatalf("cycle link resolves outside the snapshot to %q", within)
+		}
 	}
 }
 

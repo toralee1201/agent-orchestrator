@@ -170,11 +170,27 @@ func (c dependencyTreeCopy) copyLink(srcRoot *os.Root, rel, source, target strin
 	}
 	linkPath := filepath.Join(target, rel)
 	sourceDir := filepath.Dir(filepath.Join(source, rel))
-	resolved := resolveLinkTarget(stored, sourceDir)
+	resolved := evalLinkTarget(resolveLinkTarget(stored, sourceDir))
 	if rebased, ok := c.rebase(resolved, linkPath, source, target); ok {
 		return createDependencyLink(linkPath, rebased)
 	}
-	return copyResolvedPath(resolved, linkPath)
+	return c.copyLinkDestination(resolved, linkPath, map[string]string{})
+}
+
+// rebaseWorkspace maps a destination onto the copy when it names the source
+// workspace itself. A nested link inside an externally installed package can
+// point back at the worker checkout, and its committed content is what the
+// snapshot must provide.
+func (c dependencyTreeCopy) rebaseWorkspace(destination, linkPath string) (string, bool) {
+	rel, ok := withinTree(c.sourceWorkspace, destination)
+	if !ok {
+		return "", false
+	}
+	mapped := filepath.Join(c.targetWorkspace, rel)
+	if rebased, err := filepath.Rel(filepath.Dir(linkPath), mapped); err == nil {
+		return rebased, true
+	}
+	return mapped, true
 }
 
 // rebase maps a link target onto the copy when it names a path inside the
@@ -206,6 +222,48 @@ func resolveLinkTarget(stored, sourceDir string) string {
 	}
 	return filepath.Clean(resolved)
 }
+
+// evalLinkTarget follows a chain of links to the path it finally names. A link
+// outside the workspace may be an alias for a worker package, so classifying
+// the lexical target alone would let uncommitted worker source into the
+// snapshot.
+//
+// filepath.EvalSymlinks alone is not enough on Windows: it returns a directory
+// junction unchanged instead of following it, and a junction is what an
+// unprivileged install uses for a package link there. Each step therefore asks
+// the filesystem for the current path's own link target, which covers both
+// kinds, and EvalSymlinks then resolves any ordinary symlink still left in the
+// remaining components. A chain that does not resolve — a dangling link or a
+// cycle — is returned as far as it could be read.
+func evalLinkTarget(resolved string) string {
+	current := filepath.Clean(resolved)
+	seen := map[string]bool{}
+	for step := 0; step < linkChainLimit; step++ {
+		if seen[current] {
+			return current
+		}
+		seen[current] = true
+		parent := filepath.Dir(current)
+		root, err := os.OpenRoot(parent)
+		if err != nil {
+			break
+		}
+		stored, linkErr := root.Readlink(filepath.Base(current))
+		_ = root.Close()
+		if linkErr != nil {
+			if final, evalErr := filepath.EvalSymlinks(current); evalErr == nil {
+				current = filepath.Clean(final)
+			}
+			break
+		}
+		current = resolveLinkTarget(stored, parent)
+	}
+	return current
+}
+
+// linkChainLimit bounds how many links one chain may be followed through, so a
+// pathological chain cannot spin.
+const linkChainLimit = 32
 
 // normalizeLinkTarget strips the Windows NT object-path prefix a junction
 // reports, so a junction target compares like the ordinary path a package
@@ -294,24 +352,40 @@ func copyDependencyFile(srcRoot, dstRoot *os.Root, rel string) error {
 	return out.Close()
 }
 
-// copyResolvedPath copies what a link pointed at outside both trees into
-// linkPath, so the isolated checkout gets the content without a link that could
-// reach back to a live workspace. A target that cannot be read is an error: the
-// alternatives are a dangling dependency or, worse, a link to something the
-// suite must not see.
-func copyResolvedPath(resolved, linkPath string) error {
-	info, err := os.Stat(resolved)
+// copyLinkDestination copies what a link finally points at into linkPath. The
+// target is isolated content, so nested links inside it are followed and their
+// content copied too rather than recreated: a link left in place would reach
+// back out of the snapshot, and a directory link cannot be streamed as a file.
+// visited holds the destinations already entered on this path, which is what
+// stops a link cycle from recursing forever.
+func (c dependencyTreeCopy) copyLinkDestination(destination, linkPath string, visited map[string]string) error {
+	if rebased, ok := c.rebaseWorkspace(destination, linkPath); ok {
+		return createDependencyLink(linkPath, rebased)
+	}
+	info, err := os.Stat(destination)
 	if err != nil {
 		return fmt.Errorf("dependency link %s: %w", linkPath, err)
 	}
 	if !info.IsDir() {
-		body, readErr := os.ReadFile(resolved)
+		body, readErr := os.ReadFile(destination)
 		if readErr != nil {
 			return fmt.Errorf("dependency link %s: %w", linkPath, readErr)
 		}
 		return os.WriteFile(linkPath, body, info.Mode().Perm())
 	}
-	srcRoot, err := os.OpenRoot(resolved)
+	if previous, ok := visited[destination]; ok {
+		// The chain returned to a directory this copy already entered. Copying
+		// it again would recurse forever, so the loop is closed with a link to
+		// the copy of that ancestor: the layout the dependency expects is kept
+		// and nothing points back at a live path.
+		if rebased, relErr := filepath.Rel(filepath.Dir(linkPath), previous); relErr == nil {
+			return createDependencyLink(linkPath, rebased)
+		}
+		return createDependencyLink(linkPath, previous)
+	}
+	visited[destination] = linkPath
+
+	srcRoot, err := os.OpenRoot(destination)
 	if err != nil {
 		return err
 	}
@@ -329,6 +403,21 @@ func copyResolvedPath(resolved, linkPath string) error {
 			return walkErr
 		}
 		if rel == "." {
+			return nil
+		}
+		entryPath := filepath.Join(destination, rel)
+		stored, linkErr := srcRoot.Readlink(rel)
+		if linkErr == nil {
+			// A nested link is content of the dependency too: copy what it
+			// names, and stop descending into it here because the copy of its
+			// target already covers that subtree.
+			nested := evalLinkTarget(resolveLinkTarget(stored, filepath.Dir(entryPath)))
+			if err := c.copyLinkDestination(nested, filepath.Join(linkPath, rel), visited); err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if entry.IsDir() {

@@ -611,6 +611,54 @@ func TestRecordTestPassLinksSharedFilesWithoutReplayingSetup(t *testing.T) {
 	}
 }
 
+// A suite that needs an installed dependency tree must run in the snapshot even
+// though the checkout is fresh: the worker's own workspace already has
+// node_modules, and it is git-ignored, so the snapshot gets it by linking the
+// folder in. No setup hook runs to produce it.
+func TestRecordTestPassSeesInstalledIgnoredDependenciesWithoutSetup(t *testing.T) {
+	worktree, head := initTestRepo(t)
+	if err := os.WriteFile(filepath.Join(worktree, ".gitignore"), []byte("node_modules\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOutput(t, worktree, "add", ".gitignore")
+	gitOutput(t, worktree, "commit", "-m", "ignore node_modules")
+	head = gitOutput(t, worktree, "rev-parse", "HEAD")
+	// The dependency is installed in the worker's workspace only: it is
+	// git-ignored, so it is not part of the commit under review.
+	if err := os.MkdirAll(filepath.Join(worktree, "node_modules", "left-pad"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "node_modules", "left-pad", "index.js"), []byte("pad"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Setup leaves a marker; the suite fails if it finds one, so a snapshot that
+	// replayed post-create hooks cannot record a pass here.
+	setup := "echo ran > post-create-ran"
+	suite := "test -f node_modules/left-pad/index.js && test ! -e post-create-ran"
+	if runtime.GOOS == "windows" {
+		setup = `echo ran> post-create-ran`
+		suite = `if not exist node_modules\left-pad\index.js exit 1 & if exist post-create-ran exit 1`
+	}
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Path: worktree, Config: domain.ProjectConfig{
+			UnitTestCommand: suite, PostCreate: []string{setup},
+		}},
+	}
+
+	if err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", head); err != nil {
+		t.Fatalf("RecordTestPass: %v", err)
+	}
+	if _, ok := st.testPasses["mer-1\x00"+head]; !ok {
+		t.Fatalf("passes = %#v, want a pass after the suite read the linked dependency", st.testPasses)
+	}
+	if _, statErr := os.Stat(filepath.Join(worktree, "post-create-ran")); !os.IsNotExist(statErr) {
+		t.Fatalf("Setup ran for the unit-test snapshot: err=%v", statErr)
+	}
+}
+
 // Setup or the suite can move the snapshot's own HEAD. The pass names the
 // requested commit, so a snapshot that left it tested something else.
 func TestRecordTestPassRejectsSnapshotHeadMovedByTheSuite(t *testing.T) {

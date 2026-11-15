@@ -66,6 +66,14 @@ func (s *Service) runUnitTests(ctx context.Context, project domain.ProjectRecord
 	if err := sessionmanager.ApplySharedSymlinks(project, snapshot); err != nil {
 		return "", fmt.Errorf("%w: cannot prepare the unit-test snapshot: %w", ErrInvalid, err)
 	}
+	// A fresh checkout has no installed dependencies either, and the worker's
+	// own workspace usually does. Link the git-ignored dependency folders it
+	// already has into the snapshot so a normal suite such as npm test runs
+	// there, rather than reinstalling: nothing is executed and nothing outside
+	// the snapshot is written.
+	if _, err := sessionmanager.CarryInstalledDependencies(ctx, workspacePath, snapshot); err != nil {
+		return "", fmt.Errorf("%w: cannot share the installed dependencies with the unit-test snapshot: %w", ErrInvalid, err)
+	}
 
 	// Everything after this point must leave the snapshot's own commit and
 	// tracked content alone. Setup and the suite both run inside the snapshot,

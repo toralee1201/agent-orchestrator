@@ -613,8 +613,8 @@ func TestRecordTestPassLinksSharedFilesWithoutReplayingSetup(t *testing.T) {
 
 // A suite that needs an installed dependency tree must run in the snapshot even
 // though the checkout is fresh: the worker's own workspace already has
-// node_modules, and it is git-ignored, so the snapshot gets it by linking the
-// folder in. No setup hook runs to produce it.
+// node_modules, and it is git-ignored, so the snapshot gets its own copy of the
+// folder. No setup hook runs to produce it.
 func TestRecordTestPassSeesInstalledIgnoredDependenciesWithoutSetup(t *testing.T) {
 	worktree, _ := initTestRepo(t)
 	if err := os.WriteFile(filepath.Join(worktree, ".gitignore"), []byte("node_modules\n"), 0o600); err != nil {
@@ -652,10 +652,97 @@ func TestRecordTestPassSeesInstalledIgnoredDependenciesWithoutSetup(t *testing.T
 		t.Fatalf("RecordTestPass: %v", err)
 	}
 	if _, ok := st.testPasses["mer-1\x00"+head]; !ok {
-		t.Fatalf("passes = %#v, want a pass after the suite read the linked dependency", st.testPasses)
+		t.Fatalf("passes = %#v, want a pass after the suite read the copied dependency", st.testPasses)
 	}
 	if _, statErr := os.Stat(filepath.Join(worktree, "post-create-ran")); !os.IsNotExist(statErr) {
 		t.Fatalf("Setup ran for the unit-test snapshot: err=%v", statErr)
+	}
+}
+
+// The dependency tree the suite sees must be its own copy. A suite that
+// rewrites or prunes its dependencies would otherwise corrupt the worker's
+// live workspace while the worker is still running.
+func TestRecordTestPassCannotWriteThroughToTheWorkersDependencies(t *testing.T) {
+	worktree, _ := initTestRepo(t)
+	writeFile(t, filepath.Join(worktree, ".gitignore"), "node_modules\n")
+	gitOutput(t, worktree, "add", ".gitignore")
+	gitOutput(t, worktree, "commit", "-m", "ignore node_modules")
+	head := gitOutput(t, worktree, "rev-parse", "HEAD")
+	// Installed in the worker's workspace only, and git-ignored, so it is not
+	// part of the commit under review.
+	writeFile(t, filepath.Join(worktree, "node_modules", "left-pad", "index.js"), "pad")
+
+	// The suite does what a test cache or a regenerate step does: rewrite and
+	// then remove its dependency folder.
+	suite := "echo rewritten > node_modules/left-pad/index.js && rm -rf node_modules"
+	if runtime.GOOS == "windows" {
+		suite = `echo rewritten> node_modules\left-pad\index.js & rmdir /s /q node_modules`
+	}
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Path: worktree, Config: domain.ProjectConfig{
+			UnitTestCommand: suite,
+		}},
+	}
+
+	if err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", head); err != nil {
+		t.Fatalf("RecordTestPass: %v", err)
+	}
+	if _, ok := st.testPasses["mer-1\x00"+head]; !ok {
+		t.Fatalf("passes = %#v, want a pass for the commit that ran", st.testPasses)
+	}
+	body, err := os.ReadFile(filepath.Join(worktree, "node_modules", "left-pad", "index.js"))
+	if err != nil {
+		t.Fatalf("the worker's installed dependency folder did not survive the run: %v", err)
+	}
+	if strings.TrimSpace(string(body)) != "pad" {
+		t.Fatalf("worker dependency content = %q, want the untouched %q", body, "pad")
+	}
+}
+// A workspace-local package link inside node_modules names source inside the
+// worker's checkout. The snapshot must read its own committed copy: otherwise
+// uncommitted worker edits decide whether the tests pass while the snapshot
+// state check still sees the requested commit.
+func TestRecordTestPassReadsSnapshotFilesThroughAWorkspaceLocalPackageLink(t *testing.T) {
+	worktree, _ := initTestRepo(t)
+	writeFile(t, filepath.Join(worktree, ".gitignore"), "node_modules\n")
+	writeFile(t, filepath.Join(worktree, "packages", "app", "index.js"), "committed\n")
+	gitOutput(t, worktree, "add", ".gitignore", "packages")
+	gitOutput(t, worktree, "commit", "-m", "add the workspace package")
+	head := gitOutput(t, worktree, "rev-parse", "HEAD")
+
+	// The package link is the pnpm/npm-workspaces shape and is git-ignored, so
+	// it is not part of the commit under review.
+	if err := os.MkdirAll(filepath.Join(worktree, "node_modules"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	linkTestDirectory(t, filepath.Join(worktree, "node_modules", "app"), filepath.Join("..", "packages", "app"))
+	// An uncommitted worker edit that would make a wrong resolution pass.
+	writeFile(t, filepath.Join(worktree, "packages", "app", "marker.txt"), "worker uncommitted\n")
+
+	suite := "test ! -e node_modules/app/marker.txt && test \"$(cat node_modules/app/index.js)\" = committed"
+	if runtime.GOOS == "windows" {
+		// cmd can read the file too, so the content assertion is kept.
+		suite = `if exist node_modules\app\marker.txt exit 1` + "\n" + `findstr /c:committed node_modules\app\index.js >nul || exit 1`
+	}
+	st := &fakeStore{
+		session: domain.SessionRecord{ID: "mer-1", ProjectID: "proj-1", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: worktree}},
+		project: domain.ProjectRecord{ID: "proj-1", Path: worktree, Config: domain.ProjectConfig{
+			UnitTestCommand: suite,
+		}},
+	}
+
+	if err := New(nil, st, WithDataDir(t.TempDir())).RecordTestPass(context.Background(), "mer-1", head); err != nil {
+		t.Fatalf("RecordTestPass: %v", err)
+	}
+	if _, ok := st.testPasses["mer-1\x00"+head]; !ok {
+		t.Fatalf("passes = %#v, want a pass after the suite read the snapshot's own package", st.testPasses)
+	}
+	// The suite ran in its own copy, so the worker's tree is untouched.
+	if _, err := os.Stat(filepath.Join(worktree, "packages", "app", "marker.txt")); err != nil {
+		t.Fatalf("the worker's workspace changed during the run: %v", err)
 	}
 }
 
@@ -802,6 +889,36 @@ func gitOutput(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %v: %v (%s)", args, err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// writeFile writes body to path, creating the parent directories it needs.
+func writeFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// linkTestDirectory creates a directory link at linkPath. A symlink is preferred;
+// on Windows a junction serves when the host lacks the symlink privilege, which
+// is the same link a package manager leaves behind.
+func linkTestDirectory(t *testing.T, linkPath, target string) {
+	t.Helper()
+	if err := os.Symlink(target, linkPath); err == nil {
+		return
+	} else if runtime.GOOS != "windows" {
+		t.Skipf("this host cannot create the directory link the test needs: %v", err)
+	}
+	resolved := target
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(filepath.Dir(linkPath), resolved)
+	}
+	if out, err := exec.Command("cmd", "/d", "/c", "mklink", "/J", linkPath, filepath.Clean(resolved)).CombinedOutput(); err != nil {
+		t.Skipf("this host cannot create the directory link the test needs: %v (%s)", err, out)
+	}
 }
 
 func TestSubmitApprovedWritesWorkerAndReviewerReports(t *testing.T) {

@@ -22,8 +22,13 @@ import (
 // local package link inside node_modules would resolve back into the worker's
 // checkout, where uncommitted edits are not part of the commit under test. A
 // copy costs disk, but makes both impossible: the suite can only disturb its
-// own throwaway checkout, and a link that named workspace source is rebased
-// onto the copy's own committed files.
+// own throwaway checkout.
+//
+// A package link naming a source checkout is the one thing a plain copy would
+// get wrong: copied verbatim it would still point at that checkout. Such a link
+// is therefore rebased onto the copy's own files. A link pointing anywhere else
+// is copied in rather than linked, so nothing in the result can reach outside
+// the isolated checkout.
 //
 // This repeats no external side effect and runs no installer. A folder the
 // target already has is left alone. Returns the repo-relative paths copied.
@@ -44,7 +49,10 @@ func CopyInstalledDependencies(ctx context.Context, sourcePath, workspacePath st
 	}
 	defer func() { _ = dstRoot.Close() }()
 
-	trees := dependencyTreeCopy{sourceWorkspace: sourcePath, targetWorkspace: workspacePath}
+	trees := dependencyTreeCopy{
+		sourceWorkspace: sourcePath,
+		targetWorkspace: workspacePath,
+	}
 	var copied []string
 	err = fs.WalkDir(srcRoot.FS(), ".", func(rel string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -152,29 +160,26 @@ func (c dependencyTreeCopy) copyTree(ctx context.Context, source, target string)
 // copyLink recreates one link inside the copy. A link that named source inside
 // this checkout is rewritten to name the copy's own file instead: that is what
 // keeps a workspace-local package pointing at the committed content under test
-// rather than at the worker's possibly-dirty checkout.
+// rather than at the worker's possibly-dirty checkout. A link pointing outside
+// both trees is not carried over as a link at all — its content is copied in,
+// so nothing inside the isolated checkout can reach back to a live workspace.
 func (c dependencyTreeCopy) copyLink(srcRoot *os.Root, rel, source, target string) error {
 	stored, err := srcRoot.Readlink(rel)
 	if err != nil {
 		return err
 	}
 	linkPath := filepath.Join(target, rel)
-	rebased := c.rebase(stored, filepath.Dir(filepath.Join(source, rel)), filepath.Dir(linkPath), source, target)
-	return createDependencyLink(linkPath, rebased)
+	sourceDir := filepath.Dir(filepath.Join(source, rel))
+	resolved := resolveLinkTarget(stored, sourceDir)
+	if rebased, ok := c.rebase(resolved, linkPath, source, target); ok {
+		return createDependencyLink(linkPath, rebased)
+	}
+	return copyResolvedPath(resolved, linkPath)
 }
 
 // rebase maps a link target onto the copy when it names a path inside the
-// dependency tree being copied or inside the checkout that contains it. A link
-// pointing anywhere else (a global store, an absolute system path) is kept
-// verbatim: it is outside both trees, so it cannot reach the worker's
-// workspace or this checkout.
-func (c dependencyTreeCopy) rebase(stored, sourceDir, targetDir, source, target string) string {
-	resolved := normalizeLinkTarget(stored)
-	if !filepath.IsAbs(resolved) {
-		resolved = filepath.Join(sourceDir, resolved)
-	}
-	resolved = filepath.Clean(resolved)
-
+// dependency tree being copied or inside the checkout that contains it.
+func (c dependencyTreeCopy) rebase(resolved, linkPath, source, target string) (string, bool) {
 	roots := []struct{ from, to string }{
 		{from: source, to: target},
 		{from: c.sourceWorkspace, to: c.targetWorkspace},
@@ -185,12 +190,21 @@ func (c dependencyTreeCopy) rebase(stored, sourceDir, targetDir, source, target 
 			continue
 		}
 		mapped := filepath.Join(root.to, rel)
-		if rebased, relErr := filepath.Rel(targetDir, mapped); relErr == nil {
-			return rebased
+		if rebased, relErr := filepath.Rel(filepath.Dir(linkPath), mapped); relErr == nil {
+			return rebased, true
 		}
-		return mapped
+		return mapped, true
 	}
-	return stored
+	return "", false
+}
+
+// resolveLinkTarget turns a link's stored target into an absolute path.
+func resolveLinkTarget(stored, sourceDir string) string {
+	resolved := normalizeLinkTarget(stored)
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(sourceDir, resolved)
+	}
+	return filepath.Clean(resolved)
 }
 
 // normalizeLinkTarget strips the Windows NT object-path prefix a junction
@@ -278,4 +292,48 @@ func copyDependencyFile(srcRoot, dstRoot *os.Root, rel string) error {
 		return err
 	}
 	return out.Close()
+}
+
+// copyResolvedPath copies what a link pointed at outside both trees into
+// linkPath, so the isolated checkout gets the content without a link that could
+// reach back to a live workspace. A target that cannot be read is an error: the
+// alternatives are a dangling dependency or, worse, a link to something the
+// suite must not see.
+func copyResolvedPath(resolved, linkPath string) error {
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return fmt.Errorf("dependency link %s: %w", linkPath, err)
+	}
+	if !info.IsDir() {
+		body, readErr := os.ReadFile(resolved)
+		if readErr != nil {
+			return fmt.Errorf("dependency link %s: %w", linkPath, readErr)
+		}
+		return os.WriteFile(linkPath, body, info.Mode().Perm())
+	}
+	srcRoot, err := os.OpenRoot(resolved)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = srcRoot.Close() }()
+	if err := os.MkdirAll(linkPath, 0o750); err != nil {
+		return err
+	}
+	dstRoot, err := os.OpenRoot(linkPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dstRoot.Close() }()
+	return fs.WalkDir(srcRoot.FS(), ".", func(rel string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if rel == "." {
+			return nil
+		}
+		if entry.IsDir() {
+			return dstRoot.MkdirAll(rel, 0o750)
+		}
+		return copyDependencyFile(srcRoot, dstRoot, rel)
+	})
 }

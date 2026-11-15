@@ -421,6 +421,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		reviewsvc.WithTelemetry(telemetry),
 		reviewsvc.WithNotificationSink(notifications),
 		reviewsvc.WithCodexAccountOperationGate(codexOperationGate),
+		reviewsvc.WithDataDir(cfg.DataDir),
 	}
 	if scmProvider != nil {
 		reviewOpts = append(reviewOpts,

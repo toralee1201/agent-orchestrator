@@ -675,7 +675,9 @@ func TestTriggerSpawnsNewReviewerAndRecordsRunAfterLaunch(t *testing.T) {
 func TestTriggerRefusesHeadWithoutRecordedTestPass(t *testing.T) {
 	store := &fakeStore{enforceTestPass: true}
 	launcher := &fakeLauncher{handle: "review-mer-1"}
-	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{}, launcher)
+	// Only a project with a configured unit-test command has a pass gate.
+	gated := fakeProjects{cfg: domain.ProjectConfig{UnitTestCommand: "go test ./..."}}
+	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), gated, launcher)
 
 	_, err := trigger(context.Background(), eng, "mer-1", "", domain.AgentConfig{})
 	if !errors.Is(err, ErrTestsNotPassed) {
@@ -692,6 +694,33 @@ func TestTriggerRefusesHeadWithoutRecordedTestPass(t *testing.T) {
 	}
 	if !res.Created || !launcher.spawned {
 		t.Fatalf("expected launch after recorded pass: %+v spawned=%v", res, launcher.spawned)
+	}
+}
+
+// A project that never configured a unit-test command has nothing the daemon
+// could run, so its reviews must stay triggerable with no recorded pass — both
+// the manual trigger and the automatic one.
+func TestTriggerDoesNotRequireTestPassWithoutConfiguredCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source domain.ReviewTriggerSource
+	}{
+		{name: "manual", source: domain.ReviewTriggerAgent},
+		{name: "auto", source: domain.ReviewTriggerAuto},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeStore{enforceTestPass: true}
+			launcher := &fakeLauncher{handle: "review-mer-1"}
+			eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{}, launcher)
+
+			res, err := triggerWithSource(context.Background(), eng, "mer-1", "", domain.AgentConfig{}, tc.source)
+			if err != nil {
+				t.Fatalf("Trigger with no unitTestCommand: %v", err)
+			}
+			if !res.Created || !launcher.spawned {
+				t.Fatalf("expected launch without a configured command: %+v spawned=%v", res, launcher.spawned)
+			}
+		})
 	}
 }
 

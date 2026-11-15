@@ -91,6 +91,22 @@ func (s *Service) ListProject(ctx context.Context, projectID domain.ProjectID) (
 	return reports, nil
 }
 
+// ListSessionReports returns one session's persisted reports in creation order.
+// It never claims, acknowledges, or otherwise mutates delivery state, so a
+// caller may use it to check what it already wrote before writing again.
+func (s *Service) ListSessionReports(ctx context.Context, id domain.SessionID) ([]domain.ReportRecord, error) {
+	if s == nil || s.store == nil {
+		return nil, errors.New("report: store is required")
+	}
+	reader, ok := s.store.(interface {
+		ListReportsBySession(context.Context, domain.SessionID) ([]domain.ReportRecord, error)
+	})
+	if !ok {
+		return nil, errors.New("report: session reader is required")
+	}
+	return reader.ListReportsBySession(ctx, id)
+}
+
 // Create validates ownership and persists one pending report. Reports are
 // coordination claims and never mutate authoritative worker lifecycle state.
 func (s *Service) Create(ctx context.Context, input CreateInput) (domain.ReportRecord, error) {

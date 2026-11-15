@@ -700,6 +700,7 @@ func TestRecordTestPassCannotWriteThroughToTheWorkersDependencies(t *testing.T) 
 		t.Fatalf("worker dependency content = %q, want the untouched %q", body, "pad")
 	}
 }
+
 // A workspace-local package link inside node_modules names source inside the
 // worker's checkout. The snapshot must read its own committed copy: otherwise
 // uncommitted worker edits decide whether the tests pass while the snapshot

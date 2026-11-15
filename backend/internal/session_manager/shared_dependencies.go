@@ -6,10 +6,11 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 )
 
 // CarryInstalledDependencies makes the dependency folders a workspace has
@@ -30,7 +31,18 @@ func CarryInstalledDependencies(ctx context.Context, sourcePath, workspacePath s
 		return nil, nil
 	}
 	var linked []string
-	err := filepath.WalkDir(sourcePath, func(path string, entry fs.DirEntry, walkErr error) error {
+	srcRoot, err := os.OpenRoot(sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = srcRoot.Close() }()
+	dstRoot, err := os.OpenRoot(workspacePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = dstRoot.Close() }()
+
+	err = fs.WalkDir(srcRoot.FS(), ".", func(rel string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// An unreadable folder cannot be linked; the suite will report
 			// whatever it actually needs.
@@ -39,30 +51,27 @@ func CarryInstalledDependencies(ctx context.Context, sourcePath, workspacePath s
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if !entry.IsDir() || path == sourcePath {
+		if !entry.IsDir() || rel == "." {
 			return nil
-		}
-		rel, relErr := filepath.Rel(sourcePath, path)
-		if relErr != nil {
-			return nil //nolint:nilerr // a path outside the source is not ours to link
 		}
 		if entry.Name() == ".git" || entry.Name() == ".ao" {
 			return filepath.SkipDir
 		}
-		if strings.Count(rel, string(filepath.Separator)) >= forkDependencyDepth {
+		if strings.Count(rel, "/") >= forkDependencyDepth {
 			return filepath.SkipDir
 		}
 		if !forkDependencyDirs[entry.Name()] {
 			return nil
 		}
-		target := filepath.Join(workspacePath, rel)
-		if _, statErr := os.Lstat(target); statErr == nil {
+		// Both checks are root-scoped, so a path built during the walk cannot
+		// resolve outside the trees it was opened from.
+		if _, statErr := dstRoot.Lstat(rel); statErr == nil {
 			return filepath.SkipDir
 		}
-		if mkErr := os.MkdirAll(filepath.Dir(target), 0o750); mkErr != nil {
+		if mkErr := dstRoot.MkdirAll(filepath.Dir(rel), 0o750); mkErr != nil {
 			return fmt.Errorf("link dependency %q: %w", rel, mkErr)
 		}
-		if linkErr := linkDependencyDir(path, target); linkErr != nil {
+		if linkErr := linkDependencyDir(filepath.Join(sourcePath, rel), filepath.Join(workspacePath, rel)); linkErr != nil {
 			return fmt.Errorf("link dependency %q: %w", rel, linkErr)
 		}
 		linked = append(linked, rel)
@@ -90,7 +99,7 @@ func linkDependencyDir(source, target string) error {
 	}
 	// Each argument is passed separately: a single quoted command string would
 	// be escaped again by Go, and mklink would receive a path it cannot parse.
-	cmd := exec.Command("cmd", "/d", "/c", "mklink", "/J", target, source)
+	cmd := aoprocess.Command("cmd", "/d", "/c", "mklink", "/J", target, source)
 	out, junctionErr := cmd.CombinedOutput()
 	if junctionErr == nil {
 		return nil
@@ -104,34 +113,53 @@ func linkDependencyDir(source, target string) error {
 // copyDependencyDir copies a dependency tree into target, preserving the
 // relative layout. Called only when no link can be created, and only for a
 // git-ignored folder, so the copy never changes what a commit contains.
+//
+// Every operation goes through a root scoped to source or target, so a path
+// built inside the walk cannot resolve outside the tree being copied even if a
+// symlink appears mid-walk.
 func copyDependencyDir(source, target string) error {
-	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+	srcRoot, err := os.OpenRoot(source)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = srcRoot.Close() }()
+	// The caller links into a folder the checkout does not have yet, so the
+	// copy target may not exist. OpenRoot requires an existing directory.
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		return err
+	}
+	dstRoot, err := os.OpenRoot(target)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dstRoot.Close() }()
+
+	return fs.WalkDir(srcRoot.FS(), ".", func(rel string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		rel, relErr := filepath.Rel(source, path)
-		if relErr != nil {
-			return relErr
+		if rel == "." {
+			return nil
 		}
-		dst := filepath.Join(target, rel)
 		if entry.IsDir() {
-			return os.MkdirAll(dst, 0o750)
+			return dstRoot.MkdirAll(rel, 0o750)
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
-			linkTarget, readErr := os.Readlink(path)
+			linkTarget, readErr := srcRoot.Readlink(rel)
 			if readErr != nil {
 				return readErr
 			}
-			return os.Symlink(linkTarget, dst)
+			return dstRoot.Symlink(linkTarget, rel)
 		}
-		return copyDependencyFile(path, dst)
+		return copyDependencyFile(srcRoot, dstRoot, rel)
 	})
 }
 
 // copyDependencyFile streams one file so a large dependency tree is never
-// buffered whole in memory.
-func copyDependencyFile(source, target string) error {
-	in, err := os.Open(source)
+// buffered whole in memory. Both sides are root-scoped, so the paths cannot
+// escape the trees they were opened from.
+func copyDependencyFile(srcRoot, dstRoot *os.Root, rel string) error {
+	in, err := srcRoot.Open(rel)
 	if err != nil {
 		return err
 	}
@@ -140,7 +168,7 @@ func copyDependencyFile(source, target string) error {
 	if err != nil {
 		return err
 	}
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	out, err := dstRoot.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
 	if err != nil {
 		return err
 	}

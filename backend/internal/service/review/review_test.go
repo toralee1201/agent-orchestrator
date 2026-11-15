@@ -616,13 +616,13 @@ func TestRecordTestPassLinksSharedFilesWithoutReplayingSetup(t *testing.T) {
 // node_modules, and it is git-ignored, so the snapshot gets it by linking the
 // folder in. No setup hook runs to produce it.
 func TestRecordTestPassSeesInstalledIgnoredDependenciesWithoutSetup(t *testing.T) {
-	worktree, head := initTestRepo(t)
+	worktree, _ := initTestRepo(t)
 	if err := os.WriteFile(filepath.Join(worktree, ".gitignore"), []byte("node_modules\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	gitOutput(t, worktree, "add", ".gitignore")
 	gitOutput(t, worktree, "commit", "-m", "ignore node_modules")
-	head = gitOutput(t, worktree, "rev-parse", "HEAD")
+	head := gitOutput(t, worktree, "rev-parse", "HEAD")
 	// The dependency is installed in the worker's workspace only: it is
 	// git-ignored, so it is not part of the commit under review.
 	if err := os.MkdirAll(filepath.Join(worktree, "node_modules", "left-pad"), 0o750); err != nil {

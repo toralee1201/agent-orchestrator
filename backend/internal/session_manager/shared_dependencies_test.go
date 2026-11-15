@@ -119,12 +119,12 @@ func TestLinkDependencyDirHandlesPathsWithSpaces(t *testing.T) {
 // Where no link can be created the tree is copied instead: the suite still sees
 // the dependency, and the copy is independent of the source.
 func TestCopyDependencyDirCopiesTheTree(t *testing.T) {
-	source, target := t.TempDir(), t.TempDir()
+	source := t.TempDir()
 	writeTestFile(t, filepath.Join(source, "left-pad", "index.js"), "pad")
 	writeTestFile(t, filepath.Join(source, "nested", "deep", "x.js"), "deep")
-	if err := os.MkdirAll(target, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	// The copy target is created inside a checkout that has no node_modules
+	// yet, so it does not exist when the copy starts.
+	target := filepath.Join(t.TempDir(), "node_modules")
 
 	if err := copyDependencyDir(source, target); err != nil {
 		t.Fatalf("copyDependencyDir: %v", err)

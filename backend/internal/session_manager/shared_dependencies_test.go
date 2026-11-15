@@ -259,6 +259,87 @@ func TestCopyInstalledDependenciesCopiesLinksToOutsideDirectories(t *testing.T) 
 	}
 }
 
+// A link that finally points at one large external file is copied by
+// streaming, and cancellation must stop it mid-file. The source synchronises
+// with the copy's own reads: it hands over one chunk, then holds the next read
+// until the request is cancelled, so the copy is guaranteed to be in flight
+// when it is cancelled and can never reach the end of the file first.
+func TestCopyLinkedFileStopsMidStreamWhenCancelled(t *testing.T) {
+	linkPath := filepath.Join(t.TempDir(), "big.bin")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	source := &heldReader{ctx: ctx, started: make(chan struct{}), chunk: make([]byte, 4096)}
+	go func() {
+		<-source.started
+		cancel()
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- copyLinkedFile(ctx, source, linkPath, 0o600)
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("copyLinkedFile did not stop after cancellation")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("copyLinkedFile on a cancelled request = %v, want context.Canceled", err)
+	}
+	info, statErr := os.Stat(linkPath)
+	if statErr != nil {
+		t.Fatalf("partial copy missing: %v", statErr)
+	}
+	if info.Size() == 0 || info.Size() > int64(2*len(source.chunk)) {
+		t.Fatalf("copy stopped at %d bytes, want one or two chunks of a partial copy", info.Size())
+	}
+}
+
+// heldReader hands over one chunk, then holds every later read until the
+// request is cancelled. A copy reading from it can never finish on its own, so
+// a test can cancel it mid-stream without racing the filesystem.
+type heldReader struct {
+	ctx     context.Context
+	started chan struct{}
+	chunk   []byte
+	read    bool
+}
+
+func (r *heldReader) Read(p []byte) (int, error) {
+	if !r.read {
+		r.read = true
+		close(r.started)
+	} else {
+		<-r.ctx.Done()
+	}
+	return copy(p, r.chunk), nil
+}
+
+// The file branch of copyLinkDestination copies an external file's content in,
+// so the snapshot holds the bytes rather than a link back out to a live path.
+func TestCopyLinkDestinationCopiesAnExternalFile(t *testing.T) {
+	parent := t.TempDir()
+	source, target := filepath.Join(parent, "worker"), filepath.Join(parent, "snapshot")
+	external := filepath.Join(parent, "global-store", "index.js")
+	writeTestFile(t, external, "globally installed")
+	if err := os.MkdirAll(filepath.Join(target, "node_modules"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	trees := dependencyTreeCopy{sourceWorkspace: source, targetWorkspace: target}
+	linkPath := filepath.Join(target, "node_modules", "index.js")
+	if err := trees.copyLinkDestination(context.Background(), external, linkPath, map[string]string{}); err != nil {
+		t.Fatalf("copyLinkDestination: %v", err)
+	}
+	body, err := os.ReadFile(linkPath)
+	if err != nil {
+		t.Fatalf("copied file missing: %v", err)
+	}
+	if string(body) != "globally installed" {
+		t.Fatalf("copied content = %q, want the external file's content", body)
+	}
+}
+
 // A relative link that climbs out of the workspace resolves against the source
 // checkout, not the snapshot. Copied verbatim it would point at a path that may
 // not exist next to the snapshot, so the content is copied in instead.

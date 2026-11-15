@@ -859,26 +859,39 @@ func TestRecordTestPassStopsAndCleansUpWhenCancelled(t *testing.T) {
 	defer cancel()
 
 	// Cancel as soon as the snapshot exists and the dependency copy has started.
-	started := make(chan struct{})
+	// The run signals completion, so a run that fails before the directory
+	// appears, or finishes and cleans up before the watcher sees it, cannot
+	// leave the watcher spinning; the wait for it is bounded.
+	finished := make(chan struct{})
+	watcherDone := make(chan struct{})
 	go func() {
-		defer close(started)
+		defer close(watcherDone)
 		pattern := filepath.Join(dataDir, "review-tests", "*", "snapshot", "node_modules", "big")
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.After(30 * time.Second)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-finished:
 				return
-			default:
-			}
-			if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
-				cancel()
+			case <-deadline:
 				return
+			case <-ticker.C:
+				if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+					cancel()
+					return
+				}
 			}
-			time.Sleep(time.Millisecond)
 		}
 	}()
 
 	err := svc.RecordTestPass(ctx, "mer-1", head)
-	<-started
+	close(finished)
+	select {
+	case <-watcherDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the watcher did not stop after the run finished")
+	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("RecordTestPass on a cancelled request = %v, want context.Canceled", err)
 	}

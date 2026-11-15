@@ -143,7 +143,7 @@ func TestDependencyTreeCopyRebasesLinksThatNameTheWorkspace(t *testing.T) {
 }
 
 // A link naming something outside both trees — a global package store or a
-// system directory — cannot reach the worker's workspace, so it is kept as-is.
+// system directory — is not rebased; the caller copies its content in instead.
 func TestDependencyTreeCopyKeepsLinksOutsideBothTrees(t *testing.T) {
 	source, target := t.TempDir(), t.TempDir()
 	trees := dependencyTreeCopy{sourceWorkspace: source, targetWorkspace: target}
@@ -188,6 +188,47 @@ func TestCopyInstalledDependenciesCopiesLinksToOutsideDirectories(t *testing.T) 
 		t.Fatalf("copied dependency does not resolve: %v", err)
 	}
 	if string(body) != "globally installed" {
+		t.Fatalf("copied dependency content = %q, want the linked content", body)
+	}
+}
+
+// A relative link that climbs out of the workspace resolves against the source
+// checkout, not the snapshot. Copied verbatim it would point at a path that may
+// not exist next to the snapshot, so the content is copied in instead.
+func TestCopyInstalledDependenciesCopiesRelativeLinksThatEscapeTheWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	source, target := filepath.Join(parent, "worker"), filepath.Join(parent, "snapshot")
+	external := filepath.Join(parent, "shared-store", "left-pad")
+	writeTestFile(t, filepath.Join(external, "index.js"), "shared store")
+	if err := os.MkdirAll(filepath.Join(source, "node_modules"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(source, "node_modules", "left-pad")
+	escaping := filepath.Join("..", "..", "shared-store", "left-pad")
+	if err := createDependencyLink(linkPath, escaping); err != nil {
+		t.Skipf("this host cannot create the link the test needs: %v", err)
+	}
+
+	if _, err := CopyInstalledDependencies(context.Background(), source, target); err != nil {
+		t.Fatalf("CopyInstalledDependencies: %v", err)
+	}
+	copied := filepath.Join(target, "node_modules", "left-pad")
+	root, err := os.OpenRoot(filepath.Join(target, "node_modules"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if stored, linkErr := root.Readlink("left-pad"); linkErr == nil {
+		t.Fatalf("copied dependency is a link to %q, want a real copy", stored)
+	}
+	body, err := os.ReadFile(filepath.Join(copied, "index.js"))
+	if err != nil {
+		t.Fatalf("copied dependency does not resolve next to the snapshot: %v", err)
+	}
+	if string(body) != "shared store" {
 		t.Fatalf("copied dependency content = %q, want the linked content", body)
 	}
 }

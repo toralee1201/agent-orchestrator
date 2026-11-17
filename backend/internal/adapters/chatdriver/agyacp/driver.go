@@ -44,6 +44,7 @@ func newDriver(plugin nativeacp.Plugin, log *slog.Logger) ports.ChatDriver {
 		Harness:            domain.HarnessAgy,
 		Configure:          configure,
 		SessionMode:        sessionMode,
+		SessionOptions:     sessionOptions,
 		ValidateInitialize: validateInitialize,
 		SessionPreamble:    sessionPreamble,
 		Capabilities: ports.ChatCapabilities{
@@ -57,9 +58,9 @@ func newDriver(plugin nativeacp.Plugin, log *slog.Logger) ports.ChatDriver {
 // acp/process.go), so there is no --cwd flag. --dangerously-skip-permissions is
 // the documented yolo flag; AO's auto and bypass tiers use it to match the old
 // yolo behavior. --add-dir grants additional roots. Model, system prompt, and
-// permission mode are NOT launch flags on the acp subcommand: model stays an
-// ACP session option only when advertised, and standing instructions go through
-// the session preamble below.
+// permission mode are NOT launch flags on the acp subcommand: the model is
+// applied through the session's own model selector (see sessionOptions), and
+// standing instructions go through the session preamble below.
 func configure(_ context.Context, cfg acpdriver.LaunchConfig) ([]string, map[string]string, error) {
 	args := []string{"acp"}
 	if ports.NormalizePermissionMode(cfg.Permissions) == ports.PermissionModeAuto ||
@@ -74,6 +75,24 @@ func configure(_ context.Context, cfg acpdriver.LaunchConfig) ([]string, map[str
 		args = append(args, "--add-dir", dir)
 	}
 	return args, nil, nil
+}
+
+// sessionOptions applies AO's model choice to the session the agent advertises.
+//
+// `agy acp` takes no --model flag, and the root-level `--model` flag does not
+// reach the ACP session: `agy --model X acp` still opens the session on Agy's
+// own default model. The model therefore has to be set through the session.
+// Agy's session/new advertises a "model" config option whose values are model
+// families ("gemini-4-hydrogen"), and it also accepts the effort-qualified ids
+// `agy models` lists ("gemini-4-hydrogen-high"), deriving the thinking level
+// from the id it is given. The id is passed through unchanged so that AO's
+// model catalog, which is built from `agy models`, stays the source of truth.
+func sessionOptions(settings ports.ChatTurnSettings) []acpdriver.SessionOption {
+	model := strings.TrimSpace(settings.Model)
+	if model == "" {
+		return nil
+	}
+	return []acpdriver.SessionOption{{ID: "model", Value: model}}
 }
 
 // sessionMode maps AO's approval vocabulary onto the mode ids `agy acp`

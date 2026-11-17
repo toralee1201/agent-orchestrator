@@ -177,10 +177,58 @@ func TestProbeReportsAMissingCLIAsUnavailable(t *testing.T) {
 	}
 }
 
+// TestSessionOptionsSelectsTheRequestedAgyModel covers the model AO asks the
+// agent for. `agy acp` takes no --model flag, so the model can only reach the
+// session through its own "model" config option.
+func TestSessionOptionsSelectsTheRequestedAgyModel(t *testing.T) {
+	if got := sessionOptions(ports.ChatTurnSettings{}); got != nil {
+		t.Fatalf("sessionOptions without a model = %#v, want none", got)
+	}
+	if got := sessionOptions(ports.ChatTurnSettings{Model: "   "}); got != nil {
+		t.Fatalf("sessionOptions with a blank model = %#v, want none", got)
+	}
+	options := sessionOptions(ports.ChatTurnSettings{Model: " gemini-4-hydrogen-high "})
+	if len(options) != 1 {
+		t.Fatalf("sessionOptions = %#v, want one option", options)
+	}
+	if options[0].ID != "model" {
+		t.Fatalf("option id = %q, want the agent's model option", options[0].ID)
+	}
+	// The id is passed through unchanged: Agy accepts the effort-qualified ids
+	// `agy models` lists and derives the thinking level from them.
+	if options[0].Value != "gemini-4-hydrogen-high" {
+		t.Fatalf("option value = %q, want the requested model id", options[0].Value)
+	}
+}
+
+// agyFakeModelOption mirrors the model config option `agy acp` advertises in
+// session/new. Its values are model families; the agent also accepts the
+// effort-qualified ids `agy models` lists.
+var agyFakeModelOption = map[string]any{
+	"id": "model", "name": "Model", "category": "model", "type": "select",
+	"currentValue": "gemini-4-argon",
+	"options": []any{
+		map[string]any{"value": "gemini-4-argon", "name": "Gemini 4 Argon"},
+		map[string]any{"value": "gemini-4-hydrogen", "name": "Gemini 4 Hydrogen"},
+	},
+}
+
+// agyFakeThoughtLevelOption mirrors the thinking level option `agy acp`
+// advertises alongside the model.
+var agyFakeThoughtLevelOption = map[string]any{
+	"id": "thought_level", "name": "Thinking Level", "category": "thought_level", "type": "select",
+	"currentValue": "medium",
+	"options": []any{
+		map[string]any{"value": "low", "name": "Low"},
+		map[string]any{"value": "medium", "name": "Medium"},
+		map[string]any{"value": "high", "name": "High"},
+	},
+}
+
 // TestFakeProcessStartsOneAgyAcpProcess drives the whole ACP transport against
 // a fake `agy acp` stdio child. It proves argv is the acp subcommand on the agy
 // CLI (not agy_acp_server), that one process is kept for the session, and that
-// no undocumented flags or startup model pushes reach the wire.
+// no undocumented flags reach the wire.
 func TestFakeProcessStartsOneAgyAcpProcess(t *testing.T) {
 	dir := t.TempDir()
 	argvPath := dir + "/argv.txt"
@@ -235,6 +283,43 @@ func TestFakeProcessStartsOneAgyAcpProcess(t *testing.T) {
 	}
 	if got := strings.Count(strings.TrimSpace(string(pids)), "\n") + 1; got != 1 {
 		t.Fatalf("expected one kept agy acp process, got %d pids: %s", got, pids)
+	}
+}
+
+// TestFakeProcessSendsTheRequestedModelToTheSession proves AO's model choice
+// reaches the agent. `agy acp` has no --model flag and the root-level --model
+// flag does not reach the ACP session, so the model must go out as the
+// session's own model config option.
+func TestFakeProcessSendsTheRequestedModelToTheSession(t *testing.T) {
+	dir := t.TempDir()
+	wirePath := dir + "/wire.log"
+	driver := newDriver(&fakePlugin{binary: os.Args[0], status: ports.AgentAuthStatusAuthorized}, nil)
+	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
+		SessionID: "agy-model", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
+		Model: "gemini-4-hydrogen-high", Permissions: ports.PermissionModeAcceptEdits,
+		Env: map[string]string{
+			"AGY_ACP_FAKE": "1", "AGY_ACP_ARGV": dir + "/argv.txt",
+			"AGY_ACP_WIRE_LOG": wirePath, "AGY_ACP_MODELS": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		if stopper, ok := conv.(interface{ Terminate() error }); ok {
+			_ = stopper.Terminate()
+		}
+	})
+	waitWire(t, wirePath, "session/set_config_option")
+	body, err := os.ReadFile(wirePath)
+	if err != nil {
+		t.Fatalf("read wire: %v", err)
+	}
+	if !strings.Contains(string(body), `"configId":"model"`) {
+		t.Fatalf("wire missing the model config option:\n%s", body)
+	}
+	if !strings.Contains(string(body), `"value":"gemini-4-hydrogen-high"`) {
+		t.Fatalf("wire missing the requested model:\n%s", body)
 	}
 }
 
@@ -359,6 +444,15 @@ func runFakeStdio() {
 			}
 		case "session/new", "session/load", "session/resume":
 			result = map[string]any{"sessionId": "agy-session-1"}
+			if os.Getenv("AGY_ACP_MODELS") == "1" {
+				result = map[string]any{
+					"sessionId": "agy-session-1",
+					"configOptions": []any{
+						agyFakeModelOption,
+						agyFakeThoughtLevelOption,
+					},
+				}
+			}
 		case "session/set_mode", "session/set_config_option":
 			result = map[string]any{}
 		case "session/prompt":

@@ -545,6 +545,38 @@ func TestACPRelayAdoptsSuccessfulAnswerToCancelledPrompt(t *testing.T) {
 	}
 }
 
+// A plain stopReason:cancelled is the adapter's acknowledgement of
+// session/cancel, NOT a completed turn. It must remain a stall-marked failure
+// so the controller releases the queue instead of holding it on Interrupted
+// (issue #4861). This is the baseline semantics the watchdog always had.
+func TestACPRelayStalledPromptEndsWhenTheAdapterAnswersTheCancel(t *testing.T) {
+	relay, promptID := startStallTestPrompt(t)
+	stalledAt := time.Now().Add(2 * promptStallTimeout)
+	if first := failStalled(t, relay, 1, stalledAt); len(first.provider) == 0 {
+		t.Fatal("watchdog did not cancel the stalled prompt")
+	}
+
+	late, _ := relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-live","update":{"agent_message_chunk":{"content":{"type":"text","text":"tail of the old turn"}}}}}`+"\n"), 1, true)
+	if !strings.Contains(string(late), ACPEventIDMetaKey) || !relay.snapshot().ActivePrompt {
+		t.Fatalf("output after the cancel left the stalled prompt: active=%v frame=%s", relay.snapshot().ActivePrompt, late)
+	}
+
+	answer, _ := relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","id":`+promptID+`,"result":{"stopReason":"cancelled"}}`+"\n"), 1, true)
+	if !strings.Contains(string(answer), `"`+ACPPromptStalledDataKey+`":true`) || strings.Contains(string(answer), `"stopReason":"cancelled"`) {
+		t.Fatalf("cancelled answer = %s, want the stall failure", answer)
+	}
+	state := relay.snapshot()
+	if state.ActivePrompt || state.PendingResultEventID == "" {
+		t.Fatalf("post-answer state = %+v", state)
+	}
+	if frames := failStalled(t, relay, 1, stalledAt.Add(2*promptStallCancelGrace)); frames.client != nil || frames.provider != nil {
+		t.Fatalf("watchdog acted after the adapter answered: %+v", frames)
+	}
+	if len(relay.abandonedPrompts) != 0 {
+		t.Fatalf("an answered prompt must not be marked abandoned: %v", relay.abandonedPrompts)
+	}
+}
+
 // A late error frame for a cancelled prompt is still a failure: the relay
 // forwards the stall-marked error so the controller recognizes the failed turn.
 func TestACPRelayFailsLateErrorAnswerToCancelledPrompt(t *testing.T) {
@@ -654,6 +686,52 @@ func TestACPRelayToolCallUpdateTransitions(t *testing.T) {
 	update("tool_call_update", "t1", "cancelled")
 	if len(relay.activeToolCalls) != 0 {
 		t.Fatalf("all tool calls should be done: %v", relay.activeToolCalls)
+	}
+}
+
+// P2: a tool_call announced in a terminal state is never counted as active,
+// so a provider that emits a finished call cannot dilute the watchdog budget.
+func TestACPRelayTerminalToolCallNotRegistered(t *testing.T) {
+	for _, status := range []string{"completed", "failed", "cancelled", "error"} {
+		t.Run(status, func(t *testing.T) {
+			relay := newTestACPRelay(t)
+			frame := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"done","status":"` + status + `"}}}` + "\n"
+			relayProviderFrame(t, relay, []byte(frame), 1, true)
+			if len(relay.activeToolCalls) != 0 {
+				t.Fatalf("terminal tool_call (%s) registered as active: %v", status, relay.activeToolCalls)
+			}
+		})
+	}
+}
+
+// P3: an empty status update must not resurrect a call that already finished.
+func TestACPRelayEmptyStatusDoesNotResurrectToolCall(t *testing.T) {
+	relay := newTestACPRelay(t)
+	frame := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"t1","status":"in_progress"}}}` + "\n"
+	relayProviderFrame(t, relay, []byte(frame), 1, true)
+	if _, ok := relay.activeToolCalls["t1"]; !ok {
+		t.Fatal("tool_call did not register")
+	}
+	done := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed"}}}` + "\n"
+	relayProviderFrame(t, relay, []byte(done), 1, true)
+	if len(relay.activeToolCalls) != 0 {
+		t.Fatal("tool call did not finish")
+	}
+	empty := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":""}}}` + "\n"
+	relayProviderFrame(t, relay, []byte(empty), 1, true)
+	if len(relay.activeToolCalls) != 0 {
+		t.Fatalf("empty status resurrected a finished tool call: %v", relay.activeToolCalls)
+	}
+}
+
+// P3: tool-call events from a different session cannot dilute this turn's
+// watchdog budget.
+func TestACPRelayIgnoresToolCallFromOtherSession(t *testing.T) {
+	relay, _ := startStallTestPrompt(t) // active session = session-live
+	frame := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"other-session","update":{"sessionUpdate":"tool_call","toolCallId":"t1","status":"in_progress"}}}` + "\n"
+	relayProviderFrame(t, relay, []byte(frame), 1, true)
+	if len(relay.activeToolCalls) != 0 {
+		t.Fatalf("tool call from another session was counted: %v", relay.activeToolCalls)
 	}
 }
 

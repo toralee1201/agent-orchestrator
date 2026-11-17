@@ -188,16 +188,44 @@ func TestSessionOptionsSelectsTheRequestedAgyModel(t *testing.T) {
 		t.Fatalf("sessionOptions with a blank model = %#v, want none", got)
 	}
 	options := sessionOptions(ports.ChatTurnSettings{Model: " gemini-4-hydrogen-high "})
-	if len(options) != 1 {
-		t.Fatalf("sessionOptions = %#v, want one option", options)
+	if len(options) != 2 {
+		t.Fatalf("sessionOptions = %#v, want a model and a thought_level option", options)
 	}
-	if options[0].ID != "model" {
-		t.Fatalf("option id = %q, want the agent's model option", options[0].ID)
+	if options[0].ID != "model" || options[0].Value != "gemini-4-hydrogen" {
+		t.Fatalf("model option = %#v, want the model family", options[0])
 	}
-	// The id is passed through unchanged: Agy accepts the effort-qualified ids
-	// `agy models` lists and derives the thinking level from them.
-	if options[0].Value != "gemini-4-hydrogen-high" {
-		t.Fatalf("option value = %q, want the requested model id", options[0].Value)
+	if options[1].ID != "thought_level" || options[1].Value != "high" {
+		t.Fatalf("thought_level option = %#v, want the effort suffix", options[1])
+	}
+}
+
+func TestSessionOptionsSplitsEveryRecognizedEffort(t *testing.T) {
+	for _, tc := range []struct {
+		model, family, effort string
+	}{
+		{"gemini-4-hydrogen-low", "gemini-4-hydrogen", "low"},
+		{"gemini-4-hydrogen-medium", "gemini-4-hydrogen", "medium"},
+		{"gemini-4-hydrogen-high", "gemini-4-hydrogen", "high"},
+		{"gemini-4-hydrogen-xhigh", "gemini-4-hydrogen", "xhigh"},
+		// A family whose name itself ends in an effort word is not split when the
+		// suffix is not hyphen-separated.
+		{"gemini-4-hydrogen", "gemini-4-hydrogen", ""},
+	} {
+		options := sessionOptions(ports.ChatTurnSettings{Model: tc.model})
+		wantLen := 1
+		if tc.effort != "" {
+			wantLen = 2
+		}
+		if len(options) != wantLen {
+			t.Errorf("sessionOptions(%q) = %#v, want %d options", tc.model, options, wantLen)
+			continue
+		}
+		if options[0].ID != "model" || options[0].Value != tc.family {
+			t.Errorf("sessionOptions(%q) model = %#v, want family %q", tc.model, options[0], tc.family)
+		}
+		if tc.effort != "" && (options[1].ID != "thought_level" || options[1].Value != tc.effort) {
+			t.Errorf("sessionOptions(%q) thought_level = %#v, want %q", tc.model, options[1], tc.effort)
+		}
 	}
 }
 
@@ -318,8 +346,94 @@ func TestFakeProcessSendsTheRequestedModelToTheSession(t *testing.T) {
 	if !strings.Contains(string(body), `"configId":"model"`) {
 		t.Fatalf("wire missing the model config option:\n%s", body)
 	}
-	if !strings.Contains(string(body), `"value":"gemini-4-hydrogen-high"`) {
-		t.Fatalf("wire missing the requested model:\n%s", body)
+	if !strings.Contains(string(body), `"value":"gemini-4-hydrogen"`) {
+		t.Fatalf("wire missing the requested model family:\n%s", body)
+	}
+	if !strings.Contains(string(body), `"configId":"thought_level"`) {
+		t.Fatalf("wire missing the thought_level config option:\n%s", body)
+	}
+	if !strings.Contains(string(body), `"value":"high"`) {
+		t.Fatalf("wire missing the requested effort:\n%s", body)
+	}
+}
+
+// TestSecondTurnDoesNotRepeatSessionConfigOption drives two full turns against
+// a fake that echoes the family back as the model's currentValue (the way a
+// real agy session reports its selectors). Because sessionOptions now splits
+// the effort-qualified id into a family and a thought_level, both current
+// values match what the session already holds after the first turn. The second
+// SendTurn must therefore not push session/set_config_option again.
+func TestSecondTurnDoesNotRepeatSessionConfigOption(t *testing.T) {
+	dir := t.TempDir()
+	wirePath := dir + "/wire.log"
+	driver := newDriver(&fakePlugin{binary: os.Args[0], status: ports.AgentAuthStatusAuthorized}, nil)
+	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
+		SessionID: "agy-no-resend", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
+		Model: "gemini-4-hydrogen-high", Permissions: ports.PermissionModeAcceptEdits,
+		Env: map[string]string{
+			"AGY_ACP_FAKE": "1", "AGY_ACP_ARGV": dir + "/argv.txt",
+			"AGY_ACP_WIRE_LOG": wirePath, "AGY_ACP_MODELS": "1", "AGY_ACP_ECHO_CONFIG": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		if stopper, ok := conv.(interface{ Terminate() error }); ok {
+			_ = stopper.Terminate()
+		}
+	})
+	_ = nextEvent(t, conv.Events()) // controller.ready from session setup
+
+	settings := ports.ChatTurnSettings{
+		Model: "gemini-4-hydrogen-high", Approval: ports.PermissionModeAcceptEdits,
+	}
+	// The first turn applies the family + thought_level; the fake echoes them
+	// back as the session's current values.
+	first, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{Text: "first", Settings: settings})
+	if err != nil {
+		t.Fatalf("first SendTurn: %v", err)
+	}
+	if err := conv.(ports.ChatDeferredTurnStarter).StartDeferredTurn(first.ProviderTurnID); err != nil {
+		t.Fatalf("first StartDeferredTurn: %v", err)
+	}
+	waitAgyCompletion(t, conv.Events(), first.ProviderTurnID)
+	waitWire(t, wirePath, "session/set_config_option")
+
+	before := countWire(t, wirePath, "session/set_config_option")
+	if before == 0 {
+		t.Fatal("first turn did not send any session/set_config_option")
+	}
+
+	// The second turn asks for the same model. The family currentValue echoed by
+	// the fake now matches the requested family, so no setter should fire.
+	second, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{Text: "second", Settings: settings})
+	if err != nil {
+		t.Fatalf("second SendTurn: %v", err)
+	}
+	if err := conv.(ports.ChatDeferredTurnStarter).StartDeferredTurn(second.ProviderTurnID); err != nil {
+		t.Fatalf("second StartDeferredTurn: %v", err)
+	}
+	waitAgyCompletion(t, conv.Events(), second.ProviderTurnID)
+
+	if after := countWire(t, wirePath, "session/set_config_option"); after != before {
+		body, _ := os.ReadFile(wirePath)
+		t.Fatalf("second turn re-sent session/set_config_option: before %d, after %d:\n%s", before, after, body)
+	}
+}
+
+func waitAgyCompletion(t *testing.T, events <-chan ports.ChatEvent, turnID string) {
+	t.Helper()
+	deadline := time.After(8 * time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.Kind == ports.ChatEventTurnCompleted && event.ProviderTurnID == turnID {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for turn %q to complete", turnID)
+		}
 	}
 }
 
@@ -361,6 +475,29 @@ func wireContains(t *testing.T, path, needle string) bool {
 		return false
 	}
 	return strings.Contains(string(body), needle)
+}
+
+func countWire(t *testing.T, path, needle string) int {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read wire: %v", err)
+	}
+	return strings.Count(string(body), needle)
+}
+
+func nextEvent(t *testing.T, events <-chan ports.ChatEvent) ports.ChatEvent {
+	t.Helper()
+	select {
+	case event, ok := <-events:
+		if !ok {
+			t.Fatal("event stream closed")
+		}
+		return event
+	case <-time.After(8 * time.Second):
+		t.Fatal("timed out waiting for event")
+		return ports.ChatEvent{}
+	}
 }
 
 func waitWire(t *testing.T, path, needle string) {
@@ -411,6 +548,18 @@ func runFakeStdio() {
 		_ = logFile.Sync()
 	}
 
+	// When AGY_ACP_ECHO_CONFIG=1, session/set_config_option echoes back an
+	// authoritative catalog with the just-set value as currentValue, the way
+	// a real agy session updates its selectors. That lets a test verify the
+	// transport skips re-sending an unchanged option on a later turn.
+	echoConfig := os.Getenv("AGY_ACP_ECHO_CONFIG") == "1"
+	// configValues holds the live currentValue of each advertised selector.
+	configValues := map[string]any{}
+	if echoConfig {
+		configValues["model"] = agyFakeModelOption["currentValue"]
+		configValues["thought_level"] = agyFakeThoughtLevelOption["currentValue"]
+	}
+
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	out := bufio.NewWriter(os.Stdout)
@@ -421,6 +570,7 @@ func runFakeStdio() {
 		var msg struct {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
 		}
 		if err := json.Unmarshal(line, &msg); err != nil {
 			continue
@@ -453,7 +603,31 @@ func runFakeStdio() {
 					},
 				}
 			}
-		case "session/set_mode", "session/set_config_option":
+		case "session/set_config_option":
+			result = map[string]any{}
+			if echoConfig {
+				var params struct {
+					ConfigID string `json:"configId"`
+					Value    string `json:"value"`
+				}
+				if err := json.Unmarshal(msg.Params, &params); err == nil && params.ConfigID != "" {
+					configValues[params.ConfigID] = params.Value
+				}
+				modelOption := map[string]any{}
+				for k, v := range agyFakeModelOption {
+					modelOption[k] = v
+				}
+				modelOption["currentValue"] = configValues["model"]
+				thoughtOption := map[string]any{}
+				for k, v := range agyFakeThoughtLevelOption {
+					thoughtOption[k] = v
+				}
+				thoughtOption["currentValue"] = configValues["thought_level"]
+				result = map[string]any{
+					"configOptions": []any{modelOption, thoughtOption},
+				}
+			}
+		case "session/set_mode":
 			result = map[string]any{}
 		case "session/prompt":
 			result = map[string]any{"stopReason": "end_turn"}

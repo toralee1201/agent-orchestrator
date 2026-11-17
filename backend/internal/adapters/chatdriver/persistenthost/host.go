@@ -701,7 +701,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.Protocol == ProtocolACP {
 		var watchdogLog *adapterLog
 		if hostLogDirErr == nil {
-			watchdogLog = openNamedLog(hostLogDir, acpWatchdogLogName, adapterLogMaxBytes)
+			watchdogLog = openNamedLog(hostLogDir, watchdogLogName, adapterLogMaxBytes)
 			defer func() { _ = watchdogLog.Close() }()
 		}
 		watchdogLogger := slog.New(slog.NewTextHandler(io.Discard, nil))

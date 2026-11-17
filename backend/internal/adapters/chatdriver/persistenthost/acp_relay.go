@@ -218,11 +218,11 @@ func (r *acpRelay) toolCallTimeout() time.Duration {
 	// The hard cap is at least toolCallStallTimeout and grows with the base
 	// budget so a custom long base also gives long tool calls room to finish.
 	// It is never shorter than the base timeout.
-	cap := toolCallStallTimeout
-	if scaled := r.promptStallTimeout * 2; scaled > cap {
-		cap = scaled
+	hardCap := toolCallStallTimeout
+	if scaled := r.promptStallTimeout * 2; scaled > hardCap {
+		hardCap = scaled
 	}
-	return cap
+	return hardCap
 }
 
 func (r *acpRelay) snapshot() *ACPState {
@@ -714,11 +714,12 @@ func (r *acpRelay) logStallDecision(event, sessionID, promptID string, silence t
 	if r.logger == nil {
 		return
 	}
-	attrs := []any{
+	attrs := make([]any, 0, 6+len(extra))
+	attrs = append(attrs,
 		"session_id", sessionID,
 		"prompt_id", promptID,
 		"silent_for", silence.String(),
-	}
+	)
 	attrs = append(attrs, extra...)
 	r.logger.Info(event, attrs...)
 }

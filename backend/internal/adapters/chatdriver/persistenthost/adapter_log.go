@@ -8,9 +8,9 @@ import (
 
 const (
 	adapterLogName = "adapter.log"
-	// acpWatchdogLogName holds structured stall-watchdog decisions beside the
+	// watchdogLogName holds structured stall-watchdog decisions beside the
 	// provider's stderr so a silent turn can be diagnosed after reattach.
-	acpWatchdogLogName = "acp-watchdog.log"
+	watchdogLogName = "acp-watchdog.log"
 	// adapterLogMaxBytes bounds one log file. A rotation keeps the previous file
 	// beside it, so a host keeps at most twice this on disk.
 	adapterLogMaxBytes int64 = 1 << 20

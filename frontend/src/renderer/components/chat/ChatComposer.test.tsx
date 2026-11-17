@@ -406,6 +406,45 @@ describe("send keys", () => {
   window.getSelection()!.removeAllRanges();text.remove();
  });
 
+	it.each([
+		["the Browser address bar", () => Object.assign(document.createElement("input"), { type: "text" })],
+		["a terminal", () => document.createElement("textarea")],
+		["a rich text field", () => {
+			const div = Object.assign(document.createElement("div"), { tabIndex: 0 });
+			div.setAttribute("contenteditable", "true");
+			return div;
+		}],
+	])("leaves focus in %s when the window regains focus", (_, makeField) => {
+		const { field } = renderComposer({ autoFocusKey: "session-1" });
+		const other = makeField();
+		document.body.append(other);
+		other.focus();
+		expect(document.activeElement).toBe(other);
+
+		act(() => {
+			window.dispatchEvent(new Event("focus"));
+			document.dispatchEvent(new Event("visibilitychange"));
+		});
+
+		expect(document.activeElement).toBe(other);
+		expect(document.activeElement).not.toBe(field);
+		other.remove();
+	});
+
+	it("still refocuses the message field when a button held focus", () => {
+		const { field } = renderComposer({ autoFocusKey: "session-1" });
+		const button = document.createElement("button");
+		document.body.append(button);
+		button.focus();
+
+		act(() => {
+			window.dispatchEvent(new Event("focus"));
+		});
+
+		expect(document.activeElement).toBe(field);
+		button.remove();
+	});
+
 	it("does not focus the hidden or inactive chat composer", () => {
 		const { field } = renderComposer({ autoFocus: false, autoFocusKey: "session-1" });
 		expect(document.activeElement).not.toBe(field);
@@ -1077,6 +1116,30 @@ describe("send keys", () => {
 			"Message delivery wasn’t confirmed before Chat restarted",
 		);
 		await waitFor(() => expect(getChatDraftBoundaries(sessionId)).toEqual([]));
+	});
+
+	// Signed out, nothing can be sent: a restored delivery waits for the login
+	// rather than offering a retry whose send would be dropped.
+	it.each([
+		["the send button", false, "Retry message safely"],
+		["the unsent strip", true, "Retry"],
+	])("holds a restored delivery's retry on %s while typing is locked", async (_where, parkUnsentSends, name) => {
+		const sessionId = `composer-restored-delivery-locked-${parkUnsentSends}`;
+		prepareChatComposerDelivery(sessionId, {
+			kind: "send",
+			composerText: "wait for the login",
+			attachments: [],
+			requestText: "wait for the login",
+			clientMessageId: `composer-restored-delivery-locked-${parkUnsentSends}-id`,
+		});
+		const onSend = vi.fn(async () => undefined);
+		const view = render(<ChatComposer parkUnsentSends={parkUnsentSends} onSend={onSend} draftSessionId={sessionId} typingLocked />);
+
+		expect(await screen.findByRole("button", { name })).toBeDisabled();
+		expect(onSend).not.toHaveBeenCalled();
+
+		view.rerender(<ChatComposer parkUnsentSends={parkUnsentSends} onSend={onSend} draftSessionId={sessionId} />);
+		await waitFor(() => expect(screen.getByRole("button", { name })).toBeEnabled());
 	});
 
 	it.each([false, true])("preserves a newer draft when an old surface accepts before replacement mount: %s", async (acceptBeforeMount) => {
@@ -2005,7 +2068,7 @@ describe("slash commands", () => {
 		const options = screen.getAllByRole("option");
 		expect(options).toHaveLength(2);
 		// The prefix match leads; the mid-name match follows.
-		expect(options[0]?.textContent).toContain("/review");
+		expect(options[0]?.textContent).toMatch(/^Review/);
 	});
 
 	// The whole point of gating on the provider's answer: with nothing to offer,
@@ -2024,7 +2087,7 @@ describe("slash commands", () => {
 		const { field } = renderComposer({ skills: SKILLS });
 		await typeInComposer(field, "look here /rev");
 		expect(screen.getByRole("listbox")).toBeInTheDocument();
-		expect(screen.getByRole("option", { name: /\/review/ })).toBeInTheDocument();
+		expect(screen.getByRole("option", { name: /^Review/ })).toBeInTheDocument();
 	});
 
 	it("moves the highlight with the arrow keys and wraps", async () => {
@@ -2078,8 +2141,8 @@ describe("slash commands", () => {
 	it.each(["Enter", "Tab"])("finds /btw through /side and completes with %s before sending the prompt", async key => {
 		const {onSend,field}=renderComposer({skills:[{name:"btw",displayName:"btw",description:"Open a new side chat",source:"AO"}]});
 		await typeInComposer(field,"/side");
-		expect(screen.getByRole("option",{name:/\/btw/})).toBeInTheDocument();
-		expect(screen.queryByRole("option",{name:/^\/side\b/})).not.toBeInTheDocument();
+		expect(screen.getByRole("option",{name: /^BTW/})).toBeInTheDocument();
+		expect(screen.queryByRole("option",{name: /^Side/})).not.toBeInTheDocument();
 		await userEvent.keyboard(`{${key}}`);
 		expect(composerWireText(field)).toBe("/btw ");
 		expect(onSend).not.toHaveBeenCalled();
@@ -2222,7 +2285,7 @@ describe("slash commands", () => {
 	it("selects with the mouse", async () => {
 		const { field } = renderComposer({ skills: SKILLS });
 		await typeInComposer(field, "/");
-		await userEvent.click(screen.getByText("/ship"));
+		await userEvent.click(screen.getByText("Ship"));
 		expect(field.querySelector('[data-composer-token="skill"]')).toHaveTextContent("/ship");
 	});
 });

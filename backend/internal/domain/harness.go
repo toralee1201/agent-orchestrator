@@ -39,12 +39,15 @@ const (
 	HarnessUnreal      AgentHarness = "unreal-agent"
 	HarnessCodewhale   AgentHarness = "codewhale"
 	HarnessMiMoCode    AgentHarness = "mimo-code"
+	HarnessMiniMaxCode AgentHarness = "minimax-code"
 	HarnessMemcode     AgentHarness = "memcode"
 	HarnessDeepSeek    AgentHarness = "deepseek-harness"
 	HarnessOpenHands   AgentHarness = "openhands"
 	HarnessCommandCode AgentHarness = "command-code"
+	HarnessDockerAgent AgentHarness = "docker-agent"
 	HarnessHermes      AgentHarness = "hermes"
 	HarnessCodeBuddy   AgentHarness = "codebuddy"
+	HarnessStakpak     AgentHarness = "stakpak"
 	// HarnessFake is retained for existing test fixtures and historical session
 	// rows, but is not user-selectable.
 	HarnessFake AgentHarness = "fake"
@@ -58,8 +61,14 @@ var AllHarnesses = []AgentHarness{
 	HarnessCopilot, HarnessGoose, HarnessAuggie, HarnessContinue, HarnessDevin, HarnessQoder,
 	HarnessCline, HarnessKimi, HarnessMuse, HarnessKiro, HarnessKilocode, HarnessVibe, HarnessPi,
 	HarnessKimchi, HarnessPrimeAgent, HarnessAutohand,
-	HarnessOMP, HarnessFX, HarnessUnreal, HarnessCodewhale, HarnessMiMoCode, HarnessDeepSeek, HarnessOpenHands,
-	HarnessCommandCode, HarnessMemcode, HarnessHermes, HarnessCodeBuddy,
+	HarnessOMP, HarnessFX, HarnessUnreal, HarnessCodewhale, HarnessMiMoCode, HarnessMiniMaxCode, HarnessDeepSeek, HarnessOpenHands,
+	HarnessCommandCode, HarnessDockerAgent, HarnessMemcode, HarnessHermes, HarnessCodeBuddy, HarnessStakpak,
+}
+
+// ChatOnly reports whether h has no terminal interface, so every session on it
+// runs in Chat.
+func (h AgentHarness) ChatOnly() bool {
+	return h == HarnessUnreal || h == HarnessDockerAgent
 }
 
 // IsKnown reports whether h is one of the supported harnesses.

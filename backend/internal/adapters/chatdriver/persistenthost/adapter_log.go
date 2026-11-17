@@ -8,6 +8,9 @@ import (
 
 const (
 	adapterLogName = "adapter.log"
+	// acpWatchdogLogName holds structured stall-watchdog decisions beside the
+	// provider's stderr so a silent turn can be diagnosed after reattach.
+	acpWatchdogLogName = "acp-watchdog.log"
 	// adapterLogMaxBytes bounds one log file. A rotation keeps the previous file
 	// beside it, so a host keeps at most twice this on disk.
 	adapterLogMaxBytes int64 = 1 << 20
@@ -30,7 +33,11 @@ type adapterLog struct {
 }
 
 func openAdapterLog(dir string, maxBytes int64) *adapterLog {
-	l := &adapterLog{path: filepath.Join(dir, adapterLogName), maxBytes: maxBytes}
+	return openNamedLog(dir, adapterLogName, maxBytes)
+}
+
+func openNamedLog(dir, name string, maxBytes int64) *adapterLog {
+	l := &adapterLog{path: filepath.Join(dir, name), maxBytes: maxBytes}
 	l.open(false)
 	return l
 }

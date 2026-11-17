@@ -44,6 +44,7 @@ func newDriver(plugin nativeacp.Plugin, log *slog.Logger) ports.ChatDriver {
 		Harness:            domain.HarnessAgy,
 		Configure:          configure,
 		SessionMode:        sessionMode,
+		SessionOptions:     sessionOptions,
 		ValidateInitialize: validateInitialize,
 		SessionPreamble:    sessionPreamble,
 		Capabilities: ports.ChatCapabilities{
@@ -57,9 +58,9 @@ func newDriver(plugin nativeacp.Plugin, log *slog.Logger) ports.ChatDriver {
 // acp/process.go), so there is no --cwd flag. --dangerously-skip-permissions is
 // the documented yolo flag; AO's auto and bypass tiers use it to match the old
 // yolo behavior. --add-dir grants additional roots. Model, system prompt, and
-// permission mode are NOT launch flags on the acp subcommand: model stays an
-// ACP session option only when advertised, and standing instructions go through
-// the session preamble below.
+// permission mode are NOT launch flags on the acp subcommand: the model is
+// applied through the session's own model selector (see sessionOptions), and
+// standing instructions go through the session preamble below.
 func configure(_ context.Context, cfg acpdriver.LaunchConfig) ([]string, map[string]string, error) {
 	args := []string{"acp"}
 	if ports.NormalizePermissionMode(cfg.Permissions) == ports.PermissionModeAuto ||
@@ -74,6 +75,45 @@ func configure(_ context.Context, cfg acpdriver.LaunchConfig) ([]string, map[str
 		args = append(args, "--add-dir", dir)
 	}
 	return args, nil, nil
+}
+
+// sessionOptions applies AO's model choice to the session the agent advertises.
+//
+// `agy acp` takes no --model flag, and the root-level `--model` flag does not
+// reach the ACP session: `agy --model X acp` still opens the session on Agy's
+// own default model. The model therefore has to be set through the session.
+// Agy's session/new advertises two config options: "model", whose values are
+// model families ("gemini-4-hydrogen"), and "thought_level". AO's catalog,
+// built from `agy models`, names effort-qualified ids ("<family>-<effort>").
+// Splitting such an id into the family and the thinking level keeps each option
+// at a value the session advertises. That also lets the transport's
+// current-value check skip a re-send on later turns: Agy echoes back the
+// family as the model's current value, which would never equal the qualified
+// id. Ids without a recognized effort suffix stay a single model option.
+func sessionOptions(settings ports.ChatTurnSettings) []acpdriver.SessionOption {
+	model := strings.TrimSpace(settings.Model)
+	if model == "" {
+		return nil
+	}
+	family, effort := splitAgyModelEffort(model)
+	options := []acpdriver.SessionOption{{ID: "model", Value: family}}
+	if effort != "" {
+		options = append(options, acpdriver.SessionOption{ID: "thought_level", Value: effort})
+	}
+	return options
+}
+
+// splitAgyModelEffort splits an effort-qualified agy model id
+// ("<family>-<effort>") into its family and thinking-level parts. The
+// recognized efforts are exactly the suffixes `agy models` appends. An id
+// without a recognized suffix is returned unchanged with an empty effort.
+func splitAgyModelEffort(model string) (family, effort string) {
+	for _, suffix := range []string{"xhigh", "medium", "high", "low"} {
+		if strings.HasSuffix(model, "-"+suffix) {
+			return strings.TrimSuffix(model, "-"+suffix), suffix
+		}
+	}
+	return model, ""
 }
 
 // sessionMode maps AO's approval vocabulary onto the mode ids `agy acp`

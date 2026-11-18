@@ -32,12 +32,13 @@ in [gemini-cli.md](gemini-cli.md).
 | [harnesses/command-code.md](harnesses/command-code.md)   | Command Code TUI setup, activity hooks, Chat over `cmd acp`, exact restore, and current limits.                 |
 | [harnesses/qoder.md](harnesses/qoder.md)               | Qoder interactive TUI settings: model, effort, approval, install detection, and the separate chat driver.     |
 | [harnesses/codebuddy.md](harnesses/codebuddy.md)         | CodeBuddy Code interactive TUI: flags, install detection, and the unset chat capability.                        |
+| [harnesses/stakpak.md](harnesses/stakpak.md)             | Stakpak Agent TUI setup, screen-read activity, permissions, exact restore, and current limits.                  |
 | [STATUS.md](STATUS.md)                                 | What is shipped on `main` today and what is still in flight.                                                          |
 | [stack.md](stack.md)                                   | Accepted library/runtime choices, pending stack decisions, and dependencies explicitly avoided for V1.                |
 | [telemetry.md](telemetry.md)                           | User-facing overview of product telemetry, privacy safeguards, and opt-out controls.                                    |
 | [posthog-cost-controls.md](posthog-cost-controls.md)   | PostHog event-name migration, ingestion drop rules, and dashboard queries for reducing telemetry spend.              |
 
-See [startup-cues.md](startup-cues.md) for command cues that gate a new worktree’s opening turn.
+See [startup-cues.md](startup-cues.md) for command cues that gate a new worktreeï¿½s opening turn.
 
 ## Mental model
 

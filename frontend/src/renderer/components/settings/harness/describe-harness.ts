@@ -50,6 +50,8 @@ export type HarnessDescribeInput = {
 	authState?: AgentAuthState;
 	/** The login or logout terminal, when it belongs to this harness. */
 	authWorkflow: AuthTerminalWorkflow | null;
+	/** The last login check for this harness failed. */
+	authCheckFailed?: boolean;
 	updatedAt?: string;
 };
 
@@ -123,7 +125,19 @@ export function describeHarness(input: HarnessDescribeInput) {
 	const renewsOnRun = authStatus === "configured" && Boolean(readinessAgent?.authentication.diagnostics?.some((step) => step.code === "token_renewal_pending"));
 	const qoder = agentId === "qoder";
 	const staleSignedOut = qoder && authStatus === "unauthorized" && readinessAgent?.authentication.freshness !== "fresh";
+	// The CLI reports a saved login it could not confirm with its provider
+	// (rejected, or the provider was unreachable). It stays signed in, with
+	// a caveat instead of a plain "Connected".
+	const loginUnconfirmed = authStatus === "authorized" && Boolean(readinessAgent?.authentication.diagnostics?.some((step) => step.code === "account_unconfirmed"));
+	// One sign-in tone for the Account and Health tabs: green only for a fresh,
+	// successful check. An expired login token the harness renews by itself is
+	// signed in, not a problem to fix; a login the CLI could not confirm is not
+	// a successful check.
+	const authTone: HarnessTone = input.authCheckFailed || readinessAgent?.authentication.freshness !== "fresh" || loginUnconfirmed ? "off"
+		: renewsOnRun || authStatus === "authorized" || authStatus === "not_applicable" ? "ok"
+		: authStatus === "unauthorized" ? "error" : "off";
 	const authSummary = renewsOnRun ? t("settings.harness.loggedIn")
+		: loginUnconfirmed ? t("settings.harness.loginUnconfirmed")
 		: authStatus === "configured" ? t(unverifiedProvider ? "settings.harness.health.authUnverified" : isSetupAction ? "settings.harness.configured" : "settings.harness.installed")
 		: authStatus === "authorized" ? t("settings.harness.loggedIn")
 		: authStatus === "not_applicable" || (!input.authPlansPending && (authPlan?.action === "instructions" || (!authPlan && (authStatus === undefined || !qoder)))) ? t("settings.harness.installed")
@@ -161,7 +175,7 @@ export function describeHarness(input: HarnessDescribeInput) {
 	return {
 		agentId, plan, job, isInstalled, availableMethods, installMethod, methodId, maintenanceMethod, canUpdate, manualOnly, noManagedInstall, updateReason,
 		advisoryQuery, advisory, updateUnknown, updateAvailable, currentVersion, busy, failed, jobFailed, currentOperation, readinessAgent,
-		authPlan, authState, authStatus, authSummary, renewsOnRun, unverifiedProvider, accountDescription, rowAuthWorkflow, authBusy, needsLogin, showSetup, isSetupAction, isDocumentationAction, canRelogin,
+		authPlan, authState, authStatus, authSummary, authTone, renewsOnRun, loginUnconfirmed, unverifiedProvider, accountDescription, rowAuthWorkflow, authBusy, needsLogin, showSetup, isSetupAction, isDocumentationAction, canRelogin,
 		showUpdate, hasDiagnostics, installWarning, rowError, versionText, versionUnverified, updatedAt: input.updatedAt, progressLabel, installationPending, installNote, listTone, statusLabel,
 	};
 }

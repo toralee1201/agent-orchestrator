@@ -100,6 +100,9 @@ var harnessProbeSpecs = map[string]harnessProbeSpec{
 	"hermes":       {BinaryName: "hermes", VersionArg: "--version"},
 	"qoder":        {BinaryName: "qoder", VersionArg: "--version"},
 	"codebuddy":    {BinaryName: "codebuddy", VersionArg: "--version"},
+	"stakpak":      {BinaryName: "stakpak", VersionArg: "--version"},
+	// MiniMax Code's CLI is `mcode`, not its harness ID.
+	"minimax-code": {BinaryName: "mcode", VersionArg: "--version"},
 }
 
 func newDoctorCommand(ctx *commandContext) *cobra.Command {

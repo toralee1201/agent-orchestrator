@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,13 +25,26 @@ const (
 	// provider that answered with an error.
 	ACPPromptStalledDataKey = "ao.promptStalled"
 
-	// promptStallTimeout is how long an in-flight session/prompt may hear
-	// nothing from the adapter, while the adapter is not waiting on the client,
-	// before the relay settles it synthetically. A live turn streams tool
-	// calls, message chunks, or state changes continuously, so a silent gap
-	// this long means the adapter's turn state machine lost the completion
-	// (upstream claude-agent-acp#1145 class) and no response will ever arrive.
+	// ACPPromptStallTimeoutEnv overrides promptStallTimeout. It is a Go duration
+	// strictly greater than zero; an unset, invalid, or non-positive value falls
+	// back to promptStallTimeout.
+	ACPPromptStallTimeoutEnv = "AO_ACP_PROMPT_STALL_TIMEOUT"
+
+	// promptStallTimeout is the default silence budget for an in-flight
+	// session/prompt. It is also the value used when ACPPromptStallTimeoutEnv is
+	// unset or invalid. A live turn streams tool calls, message chunks, or state
+	// changes continuously, so a silent gap this long means the adapter's turn
+	// state machine lost the completion (upstream claude-agent-acp#1145 class)
+	// and no response will ever arrive. The effective per-relay value lives in
+	// acpRelay.promptStallTimeout and may be configured at process start.
 	promptStallTimeout = 15 * time.Minute
+
+	// toolCallStallTimeout is the hard silence cap while the adapter has an
+	// active tool call. A build or test command can legitimately run longer than
+	// promptStallTimeout with no output at all, so silence alone must not settle
+	// such a turn at the base deadline. This bound still guarantees a dead
+	// adapter is eventually caught.
+	toolCallStallTimeout = 30 * time.Minute
 
 	// promptStallCheckInterval is how often the host re-checks for a stalled
 	// prompt.
@@ -40,6 +55,16 @@ const (
 	// adapter and settling the prompt itself.
 	promptStallCancelGrace = 30 * time.Second
 )
+
+// abandonedPrompt records a session/prompt the watchdog settled with a
+// synthetic failure after the cancel grace expired. The adapter's late answer
+// to it is discarded, not attributed to a later prompt. settledAt is the real
+// time the failure was emitted (not a backdated guess) and silence is the
+// window that triggered the stall, so the discard log reports accurate values.
+type abandonedPrompt struct {
+	settledAt time.Time
+	silence   time.Duration
+}
 
 type acpClientRequest struct {
 	clientID   json.RawMessage
@@ -107,16 +132,27 @@ type acpRelay struct {
 	// client answer to an adapter request, so the stall watchdog can tell a
 	// live turn from a lost one.
 	lastActivityAt time.Time
-	// stallCancelledAt is when the watchdog cancelled the active prompt for
-	// silence. The prompt stays active until the adapter answers it, so output
-	// the cancelled turn still emits is not attributed to the next prompt.
+	// promptStallTimeout is the effective base silence budget for this host.
+	// It defaults to promptStallTimeout and may be overridden by
+	// ACPPromptStallTimeoutEnv at construction.
+	promptStallTimeout time.Duration
+	// activeToolCalls holds ids of tool calls the adapter announced but has not
+	// reported as finished. While non-empty the watchdog uses the longer
+	// toolCallStallTimeout instead of the base silence budget, so a build or
+	// test command that emits nothing for a long time is not killed mid-run.
+	activeToolCalls map[string]struct{}
+	// stallCancelledAt is when the watchdog sent session/cancel to the active
+	// prompt for silence. The prompt stays active until the adapter answers.
 	stallCancelledAt time.Time
-	// abandonedPrompts holds provider ids of prompts the watchdog failed. The
-	// adapter's own late answer to one is dropped, not forwarded.
-	abandonedPrompts map[string]struct{}
+	// abandonedPrompts holds provider ids of prompts whose synthetic stall
+	// failure was already delivered to the controller. A late adapter answer to
+	// one of these is discarded with a log, never attributed to the next prompt.
+	abandonedPrompts map[string]abandonedPrompt
 	// heldResult is the answer that settles the turn, kept back while a steer
 	// command (keepsTurn) is still running. See providerFrame.
 	heldResult *acpHeldResult
+	// logger records watchdog decisions as structured events. It is never nil.
+	logger *slog.Logger
 }
 
 // acpHeldResult is a prompt answer the relay settles the turn with later.
@@ -127,7 +163,18 @@ type acpHeldResult struct {
 	frame    []byte
 }
 
-func newACPRelay(ctx context.Context, journalPath string) (*acpRelay, error) {
+type acpRelayOption func(*acpRelay)
+
+// withACPRelayLogger injects the structured logger used by the stall watchdog.
+func withACPRelayLogger(logger *slog.Logger) acpRelayOption {
+	return func(r *acpRelay) {
+		if logger != nil {
+			r.logger = logger
+		}
+	}
+}
+
+func newACPRelay(ctx context.Context, journalPath string, opts ...acpRelayOption) (*acpRelay, error) {
 	identity, err := randomToken()
 	if err != nil {
 		return nil, err
@@ -136,13 +183,58 @@ func newACPRelay(ctx context.Context, journalPath string) (*acpRelay, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &acpRelay{
-		identity: identity,
-		pending:  make(map[string]acpClientRequest), serverRequests: make(map[string]acpServerRequest),
-		commands:         make(map[string]acpInteractionCommand),
-		abandonedPrompts: make(map[string]struct{}),
-		promptJournal:    journal,
-	}, nil
+	r := &acpRelay{
+		identity:           identity,
+		pending:            make(map[string]acpClientRequest),
+		serverRequests:     make(map[string]acpServerRequest),
+		commands:           make(map[string]acpInteractionCommand),
+		activeToolCalls:    make(map[string]struct{}),
+		abandonedPrompts:   make(map[string]abandonedPrompt),
+		promptStallTimeout: loadPromptStallTimeout(),
+		promptJournal:      journal,
+		logger:             slog.New(slog.DiscardHandler),
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r, nil
+}
+
+// loadPromptStallTimeout resolves ACPPromptStallTimeoutEnv following the daemon's
+// duration-env convention: a positive Go duration overrides the default, while
+// an unset, malformed, or non-positive value keeps the safe default.
+func loadPromptStallTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(ACPPromptStallTimeoutEnv))
+	if raw == "" {
+		return promptStallTimeout
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return promptStallTimeout
+	}
+	return d
+}
+
+// stallTimeout is the silence budget for the active prompt. A running tool
+// call gets the longer hard cap: a build or test command may be silent far
+// longer than the base budget, and it is still bounded so a wedged adapter is
+// eventually caught.
+func (r *acpRelay) stallTimeout() time.Duration {
+	if len(r.activeToolCalls) > 0 && r.toolCallTimeout() > r.promptStallTimeout {
+		return r.toolCallTimeout()
+	}
+	return r.promptStallTimeout
+}
+
+func (r *acpRelay) toolCallTimeout() time.Duration {
+	// The hard cap is at least toolCallStallTimeout and grows with the base
+	// budget so a custom long base also gives long tool calls room to finish.
+	// It is never shorter than the base timeout.
+	hardCap := toolCallStallTimeout
+	if scaled := r.promptStallTimeout * 2; scaled > hardCap {
+		hardCap = scaled
+	}
+	return hardCap
 }
 
 func (r *acpRelay) snapshot() *ACPState {
@@ -175,6 +267,71 @@ func (r *acpRelay) captureAvailableCommands(method string, params json.RawMessag
 	}
 	r.availableCommands = append(json.RawMessage(nil), notification.Update.AvailableCommands...)
 	r.availableCommandsSession = notification.SessionID
+}
+
+// trackToolCall maintains the active tool-call set from ACP session/update
+// events:
+//
+//   - tool_call starts a call (id + non-terminal status) and records it; a call
+//     announced already terminal is never counted as active;
+//   - tool_call_update with status in_progress/pending re-asserts it; completed,
+//     failed, cancelled, or error ends it; an empty status is ignored so it
+//     cannot resurrect a call that already finished.
+//
+// Only updates for the active session are counted, so an event from another
+// session cannot dilute this turn's watchdog budget. Other session updates
+// leave the set untouched. Permission requests are handled separately by
+// serverRequests, so a call waiting on the user is not counted as adapter
+// silence either way. The caller holds the host mutex.
+func (r *acpRelay) trackToolCall(method string, params json.RawMessage) {
+	if method != "session/update" || len(params) == 0 {
+		return
+	}
+	var notification struct {
+		SessionID string `json:"sessionId"`
+		Update    struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			ToolCallID    string `json:"toolCallId"`
+			Status        string `json:"status"`
+		} `json:"update"`
+	}
+	if json.Unmarshal(params, &notification) != nil || notification.SessionID == "" {
+		return
+	}
+	if active := r.state.SessionID; active != "" && notification.SessionID != active {
+		return
+	}
+	switch notification.Update.SessionUpdate {
+	case "tool_call":
+		id := notification.Update.ToolCallID
+		if id == "" || terminalToolCallStatus(notification.Update.Status) {
+			return
+		}
+		r.activeToolCalls[id] = struct{}{}
+	case "tool_call_update":
+		id := notification.Update.ToolCallID
+		if id == "" {
+			return
+		}
+		switch strings.ToLower(notification.Update.Status) {
+		case "completed", "failed", "cancelled", "error":
+			delete(r.activeToolCalls, id)
+		case "in_progress", "pending":
+			r.activeToolCalls[id] = struct{}{}
+		}
+	}
+}
+
+// terminalToolCallStatus reports whether status names a finished tool call.
+// An empty status is not terminal: ACP uses it for a freshly announced call,
+// which starts in progress unless it explicitly says otherwise.
+func terminalToolCallStatus(status string) bool {
+	switch strings.ToLower(status) {
+	case "completed", "failed", "cancelled", "error":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *acpRelay) replayTo(ctx context.Context, dst io.Writer) error {
@@ -329,6 +486,8 @@ func (r *acpRelay) clientFrame(ctx context.Context, frame []byte, generation uin
 		r.cancelRequested = false
 		r.heldResult = nil
 		r.lastActivityAt = time.Now()
+		r.stallCancelledAt = time.Time{}
+		r.clearToolCalls()
 		if err := r.promptJournal.reset(ctx); err != nil {
 			return acpClientFrames{}, err
 		}
@@ -413,6 +572,10 @@ func (r *acpRelay) providerFrame(
 	generation uint64,
 	attached bool,
 ) ([]byte, bool, error) {
+	// Capture the quiet window before the stamp below resets it. When a late
+	// answer to a cancelled prompt arrives, this is the silence the watchdog is
+	// deciding about, and it goes into the structured log.
+	silence := time.Since(r.lastActivityAt)
 	r.lastActivityAt = time.Now()
 	var envelope map[string]json.RawMessage
 	if json.Unmarshal(frame, &envelope) != nil {
@@ -431,6 +594,7 @@ func (r *acpRelay) providerFrame(
 			return rewritten, true, nil
 		}
 		r.captureAvailableCommands(method, envelope["params"])
+		r.trackToolCall(method, envelope["params"])
 		if r.state.ActivePrompt {
 			eventID := r.newEventID()
 			injectMeta(envelope, ACPEventIDMetaKey, eventID)
@@ -450,8 +614,14 @@ func (r *acpRelay) providerFrame(
 	if len(id) == 0 {
 		return frame, false, nil
 	}
-	if _, ok := r.abandonedPrompts[string(id)]; ok {
+	if abandoned, ok := r.abandonedPrompts[string(id)]; ok {
 		delete(r.abandonedPrompts, string(id))
+		// A failure already went to the controller; the adapter's late answer
+		// cannot replace it. Log the discard using the recorded stall window
+		// and the real time since settlement, not the adapter's current delay.
+		r.logStallDecision("late_result_discarded", r.state.SessionID, string(id),
+			abandoned.silence, "settled_ago", time.Since(abandoned.settledAt).String(),
+			"reason", "prompt already settled")
 		return nil, false, nil
 	}
 
@@ -476,7 +646,7 @@ func (r *acpRelay) providerFrame(
 		// The turn's own prompt answered while this command still ran, so its
 		// answer waited for this one and settles the turn now.
 		r.heldResult = nil
-		result, retained, err := r.settleTurn(held.id, held.request, held.envelope, held.frame, generation, attached)
+		result, retained, err := r.settleTurn(held.id, held.request, held.envelope, held.frame, generation, attached, silence)
 		return append(answer, result...), retained, err
 	}
 	if request.method == "session/prompt" && r.newestPendingPrompt() != "" {
@@ -502,7 +672,7 @@ func (r *acpRelay) providerFrame(
 		return nil, false, nil
 	}
 	if request.method == "session/prompt" {
-		return r.settleTurn(id, request, envelope, frame, generation, attached)
+		return r.settleTurn(id, request, envelope, frame, generation, attached, silence)
 	}
 	if request.generation != generation || !attached {
 		return nil, false, nil
@@ -520,20 +690,32 @@ func (r *acpRelay) settleTurn(
 	frame []byte,
 	generation uint64,
 	attached bool,
+	silence time.Duration,
 ) ([]byte, bool, error) {
 	if !r.stallCancelledAt.IsZero() {
 		// The adapter has answered the last prompt of the turn the watchdog
-		// cancelled. Whatever it says, the turn ended because the adapter went
-		// silent. An earlier prompt's answer passed through providerFrame
-		// unchanged: the marker says the adapter is quiet, which holds only now.
+		// cancelled. A new turn resets stallCancelledAt in clientFrame, so a
+		// late answer from an old turn cannot be adopted here — that path is
+		// covered by abandonedPrompts in providerFrame. Only a genuinely
+		// completed answer (stopReason:end_turn, no error) is adopted; an
+		// acknowledgement of the cancel (stopReason:cancelled) or any error
+		// stays a stall failure so the controller releases its queue (#4861).
 		r.stallCancelledAt = time.Time{}
-		failure := map[string]json.RawMessage{}
-		_ = json.Unmarshal(stalledPromptFailure(id), &failure)
-		envelope = failure
+		if isAdoptableStallAnswer(envelope) {
+			r.logStallDecision("late_result_adopted", r.state.SessionID, string(id),
+				silence, "action", "adopt successful result")
+		} else {
+			failure := map[string]json.RawMessage{}
+			_ = json.Unmarshal(stalledPromptFailure(id, r.promptStallTimeout), &failure)
+			envelope = failure
+			r.logStallDecision("late_result_failure", r.state.SessionID, string(id),
+				silence, "action", "forward stall failure")
+		}
 	}
 	r.state.ActivePrompt = false
 	r.state.ActiveCompaction = false
 	r.cancelRequested = false
+	r.clearToolCalls()
 	eventID := r.newEventID()
 	injectResultMeta(envelope, ACPEventIDMetaKey, eventID)
 	rewritten := rewriteResponseID(envelope, request.clientID, frame)
@@ -590,7 +772,12 @@ func (r *acpRelay) failStalledPrompt(
 		return acpClientFrames{}, nil
 	}
 	cancelling := !r.stallCancelledAt.IsZero()
-	if !cancelling && (len(r.serverRequests) > 0 || now.Sub(r.lastActivityAt) < promptStallTimeout) {
+	silence := now.Sub(r.lastActivityAt)
+	// A turn waiting on an adapter request to the client (permission,
+	// elicitation) is not silent: the daemon owns that wait. Otherwise the
+	// deadline is the base budget, or the longer tool-call cap while the
+	// adapter has a live tool call.
+	if !cancelling && (len(r.serverRequests) > 0 || silence < r.stallTimeout()) {
 		return acpClientFrames{}, nil
 	}
 	if cancelling && now.Sub(r.stallCancelledAt) < promptStallCancelGrace {
@@ -605,6 +792,8 @@ func (r *acpRelay) failStalledPrompt(
 		cancel := marshalFrame(map[string]json.RawMessage{
 			"jsonrpc": json.RawMessage(`"2.0"`), "method": json.RawMessage(`"session/cancel"`), "params": sessionParams,
 		}, nil)
+		r.logStallDecision("stall_cancel_sent", r.state.SessionID, strings.Join(stalled, ","), silence,
+			"deadline", r.stallTimeout().String())
 		return acpClientFrames{provider: cancel}, nil
 	}
 	// The adapter ignored the cancel. Settle without the stall marker: the
@@ -628,12 +817,14 @@ func (r *acpRelay) failStalledPrompt(
 	for _, providerID := range stalled {
 		failure := rpcErrorFrame(json.RawMessage(providerID), -32603, fmt.Sprintf(
 			"provider stopped responding: no ACP output for %s and no answer to the cancel; failing the stalled prompt",
-			promptStallTimeout), nil)
+			r.promptStallTimeout), nil)
 		completion, _, err := r.providerFrame(ctx, failure, generation, attached)
 		if err != nil {
 			return acpClientFrames{}, err
 		}
-		r.abandonedPrompts[providerID] = struct{}{}
+		r.abandonedPrompts[providerID] = abandonedPrompt{settledAt: now, silence: silence}
+		r.logStallDecision("stall_failure_emitted", r.state.SessionID, providerID, silence,
+			"reason", "cancel grace expired")
 		client = append(client, completion...)
 	}
 	return acpClientFrames{client: client}, nil
@@ -668,12 +859,57 @@ func (r *acpRelay) pendingPrompts() ([]string, json.RawMessage) {
 	return stalled, sessionParams
 }
 
+// logStallDecision records a watchdog action. Fields are stable so operators
+// can correlate a cancelled prompt, its silence window, and whether its late
+// answer was adopted or discarded.
+func (r *acpRelay) logStallDecision(event, sessionID, promptID string, silence time.Duration, extra ...any) {
+	if r.logger == nil {
+		return
+	}
+	attrs := make([]any, 0, 6+len(extra))
+	attrs = append(attrs,
+		"session_id", sessionID,
+		"prompt_id", promptID,
+		"silent_for", silence.String(),
+	)
+	attrs = append(attrs, extra...)
+	r.logger.Info(event, attrs...)
+}
+
+func (r *acpRelay) clearToolCalls() {
+	for id := range r.activeToolCalls {
+		delete(r.activeToolCalls, id)
+	}
+}
+
+// isAdoptableStallAnswer reports whether a late answer to a watchdog-cancelled
+// prompt is a genuinely completed turn whose success should be adopted. Only a
+// successful result whose stopReason is end_turn qualifies: a plain
+// stopReason:cancelled is the adapter's acknowledgement of session/cancel and
+// must stay a stall failure, as must any error result.
+func isAdoptableStallAnswer(envelope map[string]json.RawMessage) bool {
+	if raw, ok := envelope["error"]; ok && len(raw) > 0 && string(raw) != "null" {
+		return false
+	}
+	raw, ok := envelope["result"]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var result struct {
+		StopReason string `json:"stopReason"`
+	}
+	if json.Unmarshal(raw, &result) != nil {
+		return false
+	}
+	return result.StopReason == "end_turn"
+}
+
 // stalledPromptFailure is the error a prompt ends with when the watchdog
-// cancelled it for silence. The data marker lets the daemon tell it from a
-// provider that answered with an error.
-func stalledPromptFailure(id json.RawMessage) []byte {
+// confirmed a failure after cancelling it for silence. The data marker lets the
+// daemon tell it from a provider that answered with an error.
+func stalledPromptFailure(id json.RawMessage, timeout time.Duration) []byte {
 	return rpcErrorFrame(id, -32603, fmt.Sprintf(
-		"provider stopped responding: no ACP output for %s; failing the stalled prompt", promptStallTimeout),
+		"provider stopped responding: no ACP output for %s; failing the stalled prompt", timeout),
 		map[string]any{ACPPromptStalledDataKey: true})
 }
 

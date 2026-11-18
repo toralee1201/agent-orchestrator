@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -683,8 +684,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	// The adapter's stderr is the only record of why a turn went silent. Keep it
 	// beside the descriptor instead of discarding it.
-	if dir, dirErr := hostDir(cfg.DataDir, cfg.SessionID); dirErr == nil {
-		adapterLog := openAdapterLog(dir, adapterLogMaxBytes)
+	hostLogDir, hostLogDirErr := hostDir(cfg.DataDir, cfg.SessionID)
+	if hostLogDirErr == nil {
+		adapterLog := openAdapterLog(hostLogDir, adapterLogMaxBytes)
 		defer func() { _ = adapterLog.Close() }()
 		child.Stderr = adapterLog
 	}
@@ -715,7 +717,19 @@ func Run(ctx context.Context, cfg Config) error {
 		shutdown: make(chan struct{}),
 	}
 	if cfg.Protocol == ProtocolACP {
-		h.acp, err = newACPRelay(ctx, filepath.Join(filepath.Dir(path), "acp-prompt.journal"))
+		var watchdogLog *adapterLog
+		if hostLogDirErr == nil {
+			watchdogLog = openNamedLog(hostLogDir, watchdogLogName, adapterLogMaxBytes)
+			defer func() { _ = watchdogLog.Close() }()
+		}
+		watchdogLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		if watchdogLog != nil {
+			watchdogLogger = slog.New(slog.NewTextHandler(watchdogLog, &slog.HandlerOptions{
+				Level: slog.LevelInfo,
+			}))
+		}
+		h.acp, err = newACPRelay(ctx, filepath.Join(filepath.Dir(path), "acp-prompt.journal"),
+			withACPRelayLogger(watchdogLogger))
 		if err != nil {
 			_ = killProviderProcess(context.WithoutCancel(ctx), child)
 			return err

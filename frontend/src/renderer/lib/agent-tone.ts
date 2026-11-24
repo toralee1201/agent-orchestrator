@@ -38,12 +38,15 @@ const AGENT_HUES: Record<AgentId, number | null> = {
 	"deepseek-harness": 265,
 	openhands: 85,
 	"command-code": null,
+	"mastra-code": null,
 	"docker-agent": null,
 	memcode: 140,
 	hermes: 75,
 	qoder: 28,
 	codebuddy: 200,
 	stakpak: 215,
+	"open-interpreter": null,
+	tau: null,
 };
 
 export function agentTone(harness: string): string {

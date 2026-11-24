@@ -1,122 +1,144 @@
 package agyacp
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agy"
+
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/binaryutil"
 	acpdriver "github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/acp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
-func TestConfigureLaunchesTheAgyCLIAcpSubcommand(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  acpdriver.LaunchConfig
-		want []string
-	}{
-		{
-			name: "bare acp subcommand, default permission",
-			cfg:  acpdriver.LaunchConfig{WorkspacePath: `C:\work`},
-			want: []string{"acp"},
-		},
-		{
-			name: "default keeps approvals",
-			cfg:  acpdriver.LaunchConfig{WorkspacePath: `C:\work`, Permissions: ports.PermissionModeDefault},
-			want: []string{"acp"},
-		},
-		{
-			name: "accept edits keeps approvals",
-			cfg:  acpdriver.LaunchConfig{WorkspacePath: `C:\work`, Permissions: ports.PermissionModeAcceptEdits},
-			want: []string{"acp"},
-		},
-		{
-			name: "auto yolo",
-			cfg:  acpdriver.LaunchConfig{WorkspacePath: `C:\work`, Permissions: ports.PermissionModeAuto},
-			want: []string{"acp", "--dangerously-skip-permissions"},
-		},
-		{
-			name: "bypass yolo",
-			cfg:  acpdriver.LaunchConfig{WorkspacePath: `C:\work`, Permissions: ports.PermissionModeBypassPermissions},
-			want: []string{"acp", "--dangerously-skip-permissions"},
-		},
-		{
-			name: "additional directories only use --add-dir",
-			cfg: acpdriver.LaunchConfig{
-				WorkspacePath: `C:\work`, Model: "gemini-4-argon", Effort: "high",
-				SystemPrompt: "Follow AO rules.", Permissions: ports.PermissionModeBypassPermissions,
-				AdditionalDirectories: []string{` C:\extra `, "", `D:\second`},
-			},
-			want: []string{
-				"acp", "--dangerously-skip-permissions",
-				"--add-dir", `C:\extra`, "--add-dir", `D:\second`,
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, env, err := configure(context.Background(), tt.cfg)
-			if err != nil {
-				t.Fatalf("configure: %v", err)
-			}
-			if env != nil {
-				t.Fatalf("configure returned env %v, want none (CLI needs no overlays)", env)
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("argv = %#v, want %#v", got, tt.want)
-			}
-			// `agy acp --help` does not list these. Do not invent them.
-			for _, banned := range []string{
-				"--model", "--cwd", "--permission-mode", "--append-system-prompt",
-				"--mode", "--system-prompt", "--uid=", "-p", "--print",
-			} {
-				for _, arg := range got {
-					if arg == banned {
-						t.Fatalf("argv contains undocumented flag %q: %v", banned, got)
-					}
-				}
-			}
-			if got[0] != "acp" {
-				t.Fatalf("first argv must be the acp subcommand, got %q", got[0])
-			}
-		})
-	}
-}
-
-func TestSessionModeUsesOnlyAdvertisedAcpModeIDs(t *testing.T) {
-	// `agy acp` session/new advertises default/accept-edits/auto/plan. Bypass is
-	// covered by --dangerously-skip-permissions on launch, so sessionMode returns
-	// "" and startup skips session/set_mode instead of failing on an unoffered id.
+func TestSessionModeMapsApprovalTiersOntoAntigravityModes(t *testing.T) {
 	for mode, want := range map[ports.PermissionMode]string{
 		ports.PermissionModeDefault:           "default",
-		ports.PermissionModeAcceptEdits:       "accept-edits",
-		ports.PermissionModeAuto:              "auto",
-		ports.PermissionModeBypassPermissions: "",
+		ports.PermissionModeAcceptEdits:       "auto_edit",
+		ports.PermissionModeAuto:              "yolo", // no classifier mode: auto runs without asking
+		ports.PermissionModeBypassPermissions: "yolo",
 	} {
 		if got := sessionMode(mode); got != want {
 			t.Errorf("sessionMode(%q) = %q, want %q", mode, got, want)
 		}
 	}
-	// Old separate-server ids must never be emitted: the CLI rejects them with
-	// -32602, which would fail startup.
-	for _, banned := range []string{"yolo", "auto_edit"} {
-		for _, mode := range []ports.PermissionMode{
-			ports.PermissionModeDefault, ports.PermissionModeAcceptEdits,
-			ports.PermissionModeAuto, ports.PermissionModeBypassPermissions,
-		} {
-			if got := sessionMode(mode); got == banned {
-				t.Fatalf("sessionMode(%q) emitted old id %q", mode, banned)
-			}
+}
+
+func TestPermissionPolicyApprovesOnceOnlyInAOsAutoModes(t *testing.T) {
+	cfg := buildConfig(nil, testResolver(t, nil), nil)
+	if cfg.ValidateTurnSettings != nil {
+		t.Fatal("approval modes switch live; no restart validator is needed")
+	}
+	request := acpsdk.RequestPermissionRequest{Options: []acpsdk.PermissionOption{
+		{OptionId: "always", Kind: acpsdk.PermissionOptionKindAllowAlways},
+		{OptionId: "once", Kind: acpsdk.PermissionOptionKindAllowOnce},
+		{OptionId: "no", Kind: acpsdk.PermissionOptionKindRejectOnce},
+	}}
+	for _, mode := range []ports.PermissionMode{ports.PermissionModeAuto, ports.PermissionModeBypassPermissions} {
+		if got, ok := cfg.PermissionPolicy(mode, request); !ok || got != "once" {
+			t.Errorf("policy(%q) = %q, %v; want allow_once, never allow_always", mode, got, ok)
 		}
+	}
+	for _, mode := range []ports.PermissionMode{ports.PermissionModeDefault, ports.PermissionModeAcceptEdits} {
+		if got, ok := cfg.PermissionPolicy(mode, request); ok {
+			t.Errorf("policy(%q) answered %q; the user decides", mode, got)
+		}
+	}
+	noOnce := acpsdk.RequestPermissionRequest{Options: []acpsdk.PermissionOption{
+		{OptionId: "always", Kind: acpsdk.PermissionOptionKindAllowAlways},
+	}}
+	if got, ok := cfg.PermissionPolicy(ports.PermissionModeAuto, noOnce); ok {
+		t.Errorf("policy chose %q without an allow_once option", got)
+	}
+}
+
+func TestSessionModeForAgentMapsOntoAgyACPModes(t *testing.T) {
+	legacy := acpsdk.InitializeResponse{AgentInfo: &acpsdk.Implementation{Name: "antigravity-acp", Version: "1.3.0"}}
+	if sessionModeForAgent(legacy) != nil {
+		t.Fatal("the separate server must keep its own mode ids")
+	}
+	cli := acpsdk.InitializeResponse{AgentInfo: &acpsdk.Implementation{Name: "Antigravity ACP Server", Version: "1.5.6"}}
+	modeFor := sessionModeForAgent(cli)
+	if modeFor == nil {
+		t.Fatal("no mode mapping for agy acp")
+	}
+	for mode, want := range map[ports.PermissionMode]string{
+		ports.PermissionModeDefault:           "default",
+		ports.PermissionModeAcceptEdits:       "accept-edits",
+		ports.PermissionModeAuto:              "accept-edits", // commands are approved by permissionPolicy
+		ports.PermissionModeBypassPermissions: "accept-edits",
+	} {
+		if got := modeFor(mode); got != want {
+			t.Errorf("agy acp mode(%q) = %q, want %q", mode, got, want)
+		}
+	}
+}
+
+func TestSteeringIsOfferedOnlyForAgyACP(t *testing.T) {
+	cfg := buildConfig(nil, testResolver(t, nil), nil)
+	if cfg.SteerPrompt == nil || cfg.SteerPrompt.Supported == nil {
+		t.Fatal("no prompt steering binding")
+	}
+	for _, tc := range []struct {
+		name, version string
+		want          bool
+	}{
+		{"Antigravity ACP Server", "1.5.4", true},
+		{"Antigravity ACP Server", "1.5.6", true},
+		{"Antigravity ACP Server", "1.5.3", false},
+		{"Antigravity ACP Server", "1.4.9", false},
+		{"antigravity-acp", "1.4.5", false},
+	} {
+		init := acpsdk.InitializeResponse{AgentInfo: &acpsdk.Implementation{Name: tc.name, Version: tc.version}}
+		if got := cfg.SteerPrompt.Supported(init); got != tc.want {
+			t.Errorf("steering for %s %s = %v, want %v", tc.name, tc.version, got, tc.want)
+		}
+	}
+}
+
+func TestAgyACPSkipsTheSeparateServersSignInBootstrap(t *testing.T) {
+	called := false
+	bootstrap := authBootstrap{geminiHome: func(map[string]string) (string, error) {
+		called = true
+		return "", errors.New("unexpected")
+	}}
+	cli := acpsdk.InitializeResponse{
+		AgentInfo:   &acpsdk.Implementation{Name: "Antigravity ACP Server", Version: "1.5.6"},
+		AuthMethods: []acpsdk.AuthMethod{{Agent: &acpsdk.AuthMethodAgent{Id: "oauth-personal", Name: "Google"}}},
+	}
+	if err := afterInitialize(bootstrap)(context.Background(), nil, cli, acpdriver.LaunchConfig{}); err != nil || called {
+		t.Fatalf("agy acp ran the sign-in bootstrap: err=%v called=%v", err, called)
+	}
+}
+
+func TestLaunchArgsMirrorTheRegistryEntry(t *testing.T) {
+	if got := launchArgs("linux"); !reflect.DeepEqual(got, []string{"--uid="}) {
+		t.Errorf("linux args = %v", got)
+	}
+	for _, goos := range []string{"darwin", "windows"} {
+		if got := launchArgs(goos); got != nil {
+			t.Errorf("%s args = %v, want none", goos, got)
+		}
+	}
+}
+
+func TestSessionOptionsSelectOnlyAChosenModel(t *testing.T) {
+	if got := sessionOptions(ports.ChatTurnSettings{}); got != nil {
+		t.Errorf("empty model options = %v", got)
+	}
+	want := []acpdriver.SessionOption{{ID: "model", Value: "gemini-3.8-flash-high", Optional: true}}
+	if got := sessionOptions(ports.ChatTurnSettings{Model: " gemini-3.8-flash-high "}); !reflect.DeepEqual(got, want) {
+		t.Errorf("options = %v, want %v", got, want)
 	}
 }
 
@@ -133,14 +155,16 @@ func TestSessionPreambleCarriesStandingInstructionsAsText(t *testing.T) {
 	}
 }
 
-func TestValidateInitializeAdmitsTheAgyCLIServer(t *testing.T) {
+func TestValidateInitializeAdmitsOnlyTestedAntigravityServers(t *testing.T) {
 	info := func(name, version string) acpsdk.InitializeResponse {
 		return acpsdk.InitializeResponse{AgentInfo: &acpsdk.Implementation{Name: name, Version: version}}
 	}
 	for _, ok := range []acpsdk.InitializeResponse{
-		info("Antigravity ACP Server", "1.5.5"),
-		info("Antigravity ACP Server", "1.3.0"),
-		info("Antigravity ACP Server", "2.0.0-beta"),
+		info("antigravity-acp", "1.3.0"),
+		info("antigravity-acp", "1.10.2"),
+		info("antigravity-acp", "2.0.0-beta"),
+		info("Antigravity ACP Server", "1.5.4"),
+		info("Antigravity ACP Server", "1.5.6"),
 	} {
 		if err := validateInitialize(ok); err != nil {
 			t.Errorf("validateInitialize(%s %s) = %v", ok.AgentInfo.Name, ok.AgentInfo.Version, err)
@@ -149,8 +173,10 @@ func TestValidateInitializeAdmitsTheAgyCLIServer(t *testing.T) {
 	for _, bad := range []acpsdk.InitializeResponse{
 		{},
 		info("cline", "3.0.0"),
-		info("antigravity-acp", "1.3.0"), // old separate server is no longer admitted
-		info("Antigravity ACP Server", "1.2.1"),
+		info("antigravity-acp", "1.2.1"),
+		info("antigravity-acp", "dev"),
+		info("Antigravity ACP Server", "1.4.0"),
+		info("Antigravity ACP Server", "1.5.3"),
 		info("Antigravity ACP Server", "dev"),
 	} {
 		if err := validateInitialize(bad); err == nil {
@@ -159,496 +185,439 @@ func TestValidateInitializeAdmitsTheAgyCLIServer(t *testing.T) {
 	}
 }
 
-func TestProbeRespectsAnUnauthorizedPlugin(t *testing.T) {
-	driver := newDriver(&fakePlugin{status: ports.AgentAuthStatusUnauthorized}, nil)
-	if _, err := driver.Probe(context.Background()); !errors.Is(err, ports.ErrChatAuthRequired) {
-		t.Fatalf("Probe = %v, want ErrChatAuthRequired", err)
+func TestResolverPrefersAnExplicitOverride(t *testing.T) {
+	dir := t.TempDir()
+	server := writeExecutable(t, filepath.Join(dir, "custom-server"))
+	r := testResolver(t, map[string]string{serverPathEnvVar: server})
+	if got, err := r.serverPath(context.Background()); err != nil || got != server {
+		t.Fatalf("serverPath = %q, %v", got, err)
 	}
-	driver = newDriver(&fakePlugin{status: ports.AgentAuthStatusAuthorized}, nil)
-	if _, err := driver.Probe(context.Background()); err != nil {
-		t.Fatalf("Probe = %v", err)
+
+	r = testResolver(t, map[string]string{serverPathEnvVar: filepath.Join(dir, "missing")})
+	if _, err := r.serverPath(context.Background()); err == nil || !strings.Contains(err.Error(), serverPathEnvVar) {
+		t.Fatalf("missing override error = %v, want it named", err)
 	}
 }
 
-func TestProbeReportsAMissingCLIAsUnavailable(t *testing.T) {
-	driver := newDriver(&fakePlugin{status: ports.AgentAuthStatusAuthorized, binErr: true}, nil)
-	if _, err := driver.Probe(context.Background()); !errors.Is(err, ports.ErrChatDriverUnavailable) {
+func TestResolverFindsTheServerBesideTheAgyCLI(t *testing.T) {
+	bin := t.TempDir()
+	cli := writeExecutable(t, filepath.Join(bin, "agy"))
+	server := writeExecutable(t, filepath.Join(bin, "agy_acp_server"))
+	r := testResolver(t, nil)
+	r.agyCLI = func(context.Context) (string, error) { return cli, nil }
+	r.resolveSpec = func(context.Context, binaryutil.BinarySpec) (string, error) {
+		t.Fatal("PATH lookup ran although the server sits beside the CLI")
+		return "", nil
+	}
+	if got, err := r.serverPath(context.Background()); err != nil || got != server {
+		t.Fatalf("serverPath = %q, %v, want %q", got, err, server)
+	}
+}
+
+func TestResolverFallsBackToPATHAndExplainsAMissingServer(t *testing.T) {
+	r := testResolver(t, nil)
+	r.agyCLI = func(context.Context) (string, error) { return "", errors.New("agy not installed") }
+	r.resolveSpec = func(_ context.Context, spec binaryutil.BinarySpec) (string, error) {
+		if spec.Label != "agy_acp_server" {
+			t.Fatalf("resolved spec %q", spec.Label)
+		}
+		return "/usr/local/bin/agy_acp_server", nil
+	}
+	if got, err := r.serverPath(context.Background()); err != nil || got != "/usr/local/bin/agy_acp_server" {
+		t.Fatalf("serverPath = %q, %v", got, err)
+	}
+
+	r.resolveSpec = func(context.Context, binaryutil.BinarySpec) (string, error) {
+		return "", ports.ErrAgentBinaryNotFound
+	}
+	if _, err := r.serverPath(context.Background()); err == nil || !strings.Contains(err.Error(), "antigravity-acp") {
+		t.Fatalf("missing server error = %v, want the registry entry named", err)
+	}
+}
+
+func TestHarnessPathFollowsASymlinkedServer(t *testing.T) {
+	install := t.TempDir()
+	server := writeExecutable(t, filepath.Join(install, "agy_acp_server.par"))
+	harness := writeExecutable(t, filepath.Join(install, "localharness_external"))
+	bin := t.TempDir()
+	link := filepath.Join(bin, "agy_acp_server")
+	if err := os.Symlink(server, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	r := testResolver(t, nil)
+	if got := r.harnessPath(link); !samePath(t, got, harness) {
+		t.Fatalf("harnessPath(symlink) = %q, want %q", got, harness)
+	}
+	if got := r.harnessPath(filepath.Join(bin, "missing")); got != "" {
+		t.Fatalf("harnessPath(missing) = %q, want empty", got)
+	}
+}
+
+func TestLaunchPointsTheServerAtItsHarness(t *testing.T) {
+	install := t.TempDir()
+	server := writeExecutable(t, filepath.Join(install, "agy_acp_server.par"))
+	harness := writeExecutable(t, filepath.Join(install, "localharness_external"))
+	cfg := buildConfig(nil, testResolver(t, map[string]string{serverPathEnvVar: server}), nil)
+	launch, err := cfg.Launch(context.Background(), acpdriver.LaunchConfig{Env: map[string]string{"PATH": "/usr/bin"}})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if launch.Command != server || !samePath(t, launch.Env[harnessPathEnvVar], harness) || launch.Env["PATH"] != "/usr/bin" {
+		t.Fatalf("launch = %+v", launch)
+	}
+	if launch.Env[disableWorkspaceTrustEnvVar] != "1" {
+		t.Fatalf("expected %s=1 in launch env, got %q", disableWorkspaceTrustEnvVar, launch.Env[disableWorkspaceTrustEnvVar])
+	}
+
+	launch, err = cfg.Launch(context.Background(), acpdriver.LaunchConfig{Env: map[string]string{
+		harnessPathEnvVar:           "/custom",
+		disableWorkspaceTrustEnvVar: "0",
+	}})
+	if err != nil || launch.Env[harnessPathEnvVar] != "/custom" || launch.Env[disableWorkspaceTrustEnvVar] != "0" {
+		t.Fatalf("an explicit %s or %s was overridden: %+v, %v", harnessPathEnvVar, disableWorkspaceTrustEnvVar, launch.Env, err)
+	}
+}
+
+func TestResolverLaunchesAgyACPFromANewEnoughCLI(t *testing.T) {
+	bin := t.TempDir()
+	cli := writeExecutable(t, filepath.Join(bin, "agy"))
+	server := writeExecutable(t, filepath.Join(bin, "agy_acp_server"))
+	for _, tc := range []struct {
+		version string
+		err     error
+		wantCLI bool
+	}{
+		{version: "1.5.4", wantCLI: true},
+		{version: "1.5.6\n", wantCLI: true},
+		{version: "2.0.0", wantCLI: true},
+		{version: "1.5.3"},
+		{version: "1.4.9"},
+		{version: "unknown"},
+		{err: errors.New("agy --version failed")},
+	} {
+		r := testResolver(t, nil)
+		r.agyCLI = func(context.Context) (string, error) { return cli, nil }
+		r.cliVersion = func(context.Context, string) (string, error) { return tc.version, tc.err }
+		got, err := r.target(context.Background())
+		if err != nil {
+			t.Fatalf("target(%q, %v): %v", tc.version, tc.err, err)
+		}
+		want := launchTarget{path: server}
+		if tc.wantCLI {
+			want = launchTarget{path: cli, cli: true}
+		}
+		if got != want {
+			t.Errorf("target(%q, %v) = %+v, want %+v", tc.version, tc.err, got, want)
+		}
+	}
+
+	// An explicit server path keeps the separate server even on a new CLI.
+	r := testResolver(t, map[string]string{serverPathEnvVar: server})
+	r.agyCLI = func(context.Context) (string, error) { return cli, nil }
+	r.cliVersion = func(context.Context, string) (string, error) {
+		t.Fatal("version probed despite an explicit server path")
+		return "", nil
+	}
+	if got, err := r.target(context.Background()); err != nil || got != (launchTarget{path: server}) {
+		t.Fatalf("target with override = %+v, %v", got, err)
+	}
+}
+
+func TestLaunchStartsAgyACPWithTheChatDataFolder(t *testing.T) {
+	cli := writeExecutable(t, filepath.Join(t.TempDir(), "agy"))
+	r := testResolver(t, nil)
+	r.agyCLI = func(context.Context) (string, error) { return cli, nil }
+	r.cliVersion = func(context.Context, string) (string, error) { return "1.5.6", nil }
+	cfg := buildConfig(nil, r, nil)
+
+	launch, err := cfg.Launch(context.Background(), acpdriver.LaunchConfig{Env: map[string]string{"PATH": "/usr/bin"}})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if launch.Command != cli || !reflect.DeepEqual(launch.Args, []string{"acp", "--app-data-dir", "antigravity-acp"}) {
+		t.Fatalf("launch = %q %v", launch.Command, launch.Args)
+	}
+	if _, set := launch.Env[harnessPathEnvVar]; set || launch.Env[disableWorkspaceTrustEnvVar] != "1" || launch.Env["PATH"] != "/usr/bin" {
+		t.Fatalf("launch env = %v", launch.Env)
+	}
+
+	launch, err = cfg.Launch(context.Background(), acpdriver.LaunchConfig{Env: map[string]string{"GEMINI_HOME": "/srv/gemini"}})
+	want := []string{"acp", "--app-data-dir", "antigravity-acp", "--gemini-dir", "/srv/gemini"}
+	if err != nil || !reflect.DeepEqual(launch.Args, want) {
+		t.Fatalf("launch with GEMINI_HOME = %v, %v; want %v", launch.Args, err, want)
+	}
+
+	// The daemon's own GEMINI_HOME reaches agy as the flag too: `agy acp`
+	// ignores the variable, so without it Chat would write ~/.gemini.
+	inherited := testResolver(t, map[string]string{"GEMINI_HOME": "/srv/daemon-gemini"})
+	inherited.agyCLI, inherited.cliVersion = r.agyCLI, r.cliVersion
+	launch, err = buildConfig(nil, inherited, nil).Launch(context.Background(), acpdriver.LaunchConfig{})
+	want = []string{"acp", "--app-data-dir", "antigravity-acp", "--gemini-dir", "/srv/daemon-gemini"}
+	if err != nil || !reflect.DeepEqual(launch.Args, want) {
+		t.Fatalf("launch with an inherited GEMINI_HOME = %v, %v; want %v", launch.Args, err, want)
+	}
+}
+
+func TestProbeReportsAMissingServerAsUnavailable(t *testing.T) {
+	r := testResolver(t, nil)
+	r.resolveSpec = func(context.Context, binaryutil.BinarySpec) (string, error) { return "", ports.ErrAgentBinaryNotFound }
+	cfg := buildConfig(nil, r, nil)
+	if err := cfg.Probe(context.Background()); !errors.Is(err, ports.ErrChatDriverUnavailable) {
 		t.Fatalf("Probe = %v, want ErrChatDriverUnavailable", err)
 	}
 }
 
-// TestSessionOptionsSelectsTheRequestedAgyModel covers the model AO asks the
-// agent for. `agy acp` takes no --model flag, so the model can only reach the
-// session through its own "model" config option.
-func TestSessionOptionsSelectsTheRequestedAgyModel(t *testing.T) {
-	if got := sessionOptions(ports.ChatTurnSettings{}); got != nil {
-		t.Fatalf("sessionOptions without a model = %#v, want none", got)
+func TestProbeRespectsAnUnauthorizedPlugin(t *testing.T) {
+	server := writeExecutable(t, filepath.Join(t.TempDir(), "agy_acp_server"))
+	r := testResolver(t, map[string]string{serverPathEnvVar: server})
+	cfg := buildConfig(fakePlugin{status: ports.AgentAuthStatusUnauthorized}, r, nil)
+	if err := cfg.Probe(context.Background()); !errors.Is(err, ports.ErrChatAuthRequired) {
+		t.Fatalf("Probe = %v, want ErrChatAuthRequired", err)
 	}
-	if got := sessionOptions(ports.ChatTurnSettings{Model: "   "}); got != nil {
-		t.Fatalf("sessionOptions with a blank model = %#v, want none", got)
-	}
-	options := sessionOptions(ports.ChatTurnSettings{Model: " gemini-4-hydrogen-high "})
-	if len(options) != 2 {
-		t.Fatalf("sessionOptions = %#v, want a model and a thought_level option", options)
-	}
-	if options[0].ID != "model" || options[0].Value != "gemini-4-hydrogen" {
-		t.Fatalf("model option = %#v, want the model family", options[0])
-	}
-	if options[1].ID != "thought_level" || options[1].Value != "high" {
-		t.Fatalf("thought_level option = %#v, want the effort suffix", options[1])
+	cfg = buildConfig(fakePlugin{status: ports.AgentAuthStatusAuthorized}, r, nil)
+	if err := cfg.Probe(context.Background()); err != nil {
+		t.Fatalf("Probe = %v", err)
 	}
 }
 
-func TestSessionOptionsSplitsEveryRecognizedEffort(t *testing.T) {
-	for _, tc := range []struct {
-		model, family, effort string
+func TestAuthBootstrapAuthenticatesOnlyAnAlreadySignedInUser(t *testing.T) {
+	advertised := acpsdk.InitializeResponse{AuthMethods: []acpsdk.AuthMethod{
+		{Agent: &acpsdk.AuthMethodAgent{Id: "oauth-personal", Name: "Log in with Google"}},
+	}}
+	tests := []struct {
+		name     string
+		init     acpsdk.InitializeResponse
+		accounts string
+		settings string
+		wantCall bool
 	}{
-		{"gemini-4-hydrogen-low", "gemini-4-hydrogen", "low"},
-		{"gemini-4-hydrogen-medium", "gemini-4-hydrogen", "medium"},
-		{"gemini-4-hydrogen-high", "gemini-4-hydrogen", "high"},
-		{"gemini-4-hydrogen-xhigh", "gemini-4-hydrogen", "xhigh"},
-		// A family whose name itself ends in an effort word is not split when the
-		// suffix is not hyphen-separated.
-		{"gemini-4-hydrogen", "gemini-4-hydrogen", ""},
-	} {
-		options := sessionOptions(ports.ChatTurnSettings{Model: tc.model})
-		wantLen := 1
-		if tc.effort != "" {
-			wantLen = 2
-		}
-		if len(options) != wantLen {
-			t.Errorf("sessionOptions(%q) = %#v, want %d options", tc.model, options, wantLen)
-			continue
-		}
-		if options[0].ID != "model" || options[0].Value != tc.family {
-			t.Errorf("sessionOptions(%q) model = %#v, want family %q", tc.model, options[0], tc.family)
-		}
-		if tc.effort != "" && (options[1].ID != "thought_level" || options[1].Value != tc.effort) {
-			t.Errorf("sessionOptions(%q) thought_level = %#v, want %q", tc.model, options[1], tc.effort)
-		}
+		{name: "signed in, not configured", init: advertised, accounts: `{"active":"me@example.com","old":[]}`, wantCall: true},
+		{name: "not signed in: never risk a browser flow", init: advertised, accounts: `{"active":"","old":[]}`},
+		{name: "no accounts file", init: advertised},
+		{name: "already configured", init: advertised, accounts: `{"active":"me@example.com"}`, settings: `{"auth":{"type":"oauth-personal"}}`},
+		{name: "method not advertised", init: acpsdk.InitializeResponse{}, accounts: `{"active":"me@example.com"}`},
 	}
-}
-
-// agyFakeModelOption mirrors the model config option `agy acp` advertises in
-// session/new. Its values are model families; the agent also accepts the
-// effort-qualified ids `agy models` lists.
-var agyFakeModelOption = map[string]any{
-	"id": "model", "name": "Model", "category": "model", "type": "select",
-	"currentValue": "gemini-4-argon",
-	"options": []any{
-		map[string]any{"value": "gemini-4-argon", "name": "Gemini 4 Argon"},
-		map[string]any{"value": "gemini-4-hydrogen", "name": "Gemini 4 Hydrogen"},
-	},
-}
-
-// agyFakeThoughtLevelOption mirrors the thinking level option `agy acp`
-// advertises alongside the model.
-var agyFakeThoughtLevelOption = map[string]any{
-	"id": "thought_level", "name": "Thinking Level", "category": "thought_level", "type": "select",
-	"currentValue": "medium",
-	"options": []any{
-		map[string]any{"value": "low", "name": "Low"},
-		map[string]any{"value": "medium", "name": "Medium"},
-		map[string]any{"value": "high", "name": "High"},
-	},
-}
-
-// TestFakeProcessStartsOneAgyAcpProcess drives the whole ACP transport against
-// a fake `agy acp` stdio child. It proves argv is the acp subcommand on the agy
-// CLI (not agy_acp_server), that one process is kept for the session, and that
-// no undocumented flags reach the wire.
-func TestFakeProcessStartsOneAgyAcpProcess(t *testing.T) {
-	dir := t.TempDir()
-	argvPath := dir + "/argv.txt"
-	wirePath := dir + "/wire.log"
-	pidPath := dir + "/pid.txt"
-	plugin := &fakePlugin{binary: os.Args[0], status: ports.AgentAuthStatusAuthorized}
-	driver := newDriver(plugin, nil)
-	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
-		SessionID: "agy-fake", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
-		Permissions: ports.PermissionModeAcceptEdits, SystemPrompt: "standing",
-		AdditionalDirectories: []string{dir + "/extra"},
-		Env: map[string]string{
-			"AGY_ACP_FAKE": "1", "AGY_ACP_ARGV": argvPath,
-			"AGY_ACP_WIRE_LOG": wirePath, "AGY_ACP_PID": pidPath,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() {
-		if stopper, ok := conv.(interface{ Terminate() error }); ok {
-			_ = stopper.Terminate()
-		}
-	})
-	argv, err := os.ReadFile(argvPath)
-	if err != nil {
-		t.Fatalf("read argv: %v", err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(argv)), "\n")
-	if len(lines) == 0 || lines[0] != "acp" {
-		t.Fatalf("first argv = %q, want the acp subcommand: %v", lines[0], lines)
-	}
-	for _, banned := range []string{
-		"--model", "--cwd", "--permission-mode", "--append-system-prompt",
-		"--mode", "--system-prompt", "--uid=",
-	} {
-		if containsArg(lines, banned) {
-			t.Fatalf("argv contains undocumented flag %q: %v", banned, lines)
-		}
-	}
-	if !containsArg(lines, "--add-dir") {
-		t.Fatalf("argv missing --add-dir: %v", lines)
-	}
-	waitWire(t, wirePath, "initialize")
-	waitWire(t, wirePath, "session/new")
-	if wireContains(t, wirePath, "session/set_config_option") {
-		t.Fatal("startup pushed a session config option (model); model must be advertised-only")
-	}
-	pids, err := os.ReadFile(pidPath)
-	if err != nil {
-		t.Fatalf("read pid: %v", err)
-	}
-	if got := strings.Count(strings.TrimSpace(string(pids)), "\n") + 1; got != 1 {
-		t.Fatalf("expected one kept agy acp process, got %d pids: %s", got, pids)
-	}
-}
-
-// TestFakeProcessSendsTheRequestedModelToTheSession proves AO's model choice
-// reaches the agent. `agy acp` has no --model flag and the root-level --model
-// flag does not reach the ACP session, so the model must go out as the
-// session's own model config option.
-func TestFakeProcessSendsTheRequestedModelToTheSession(t *testing.T) {
-	dir := t.TempDir()
-	wirePath := dir + "/wire.log"
-	driver := newDriver(&fakePlugin{binary: os.Args[0], status: ports.AgentAuthStatusAuthorized}, nil)
-	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
-		SessionID: "agy-model", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
-		Model: "gemini-4-hydrogen-high", Permissions: ports.PermissionModeAcceptEdits,
-		Env: map[string]string{
-			"AGY_ACP_FAKE": "1", "AGY_ACP_ARGV": dir + "/argv.txt",
-			"AGY_ACP_WIRE_LOG": wirePath, "AGY_ACP_MODELS": "1",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() {
-		if stopper, ok := conv.(interface{ Terminate() error }); ok {
-			_ = stopper.Terminate()
-		}
-	})
-	waitWire(t, wirePath, "session/set_config_option")
-	body, err := os.ReadFile(wirePath)
-	if err != nil {
-		t.Fatalf("read wire: %v", err)
-	}
-	if !strings.Contains(string(body), `"configId":"model"`) {
-		t.Fatalf("wire missing the model config option:\n%s", body)
-	}
-	if !strings.Contains(string(body), `"value":"gemini-4-hydrogen"`) {
-		t.Fatalf("wire missing the requested model family:\n%s", body)
-	}
-	if !strings.Contains(string(body), `"configId":"thought_level"`) {
-		t.Fatalf("wire missing the thought_level config option:\n%s", body)
-	}
-	if !strings.Contains(string(body), `"value":"high"`) {
-		t.Fatalf("wire missing the requested effort:\n%s", body)
-	}
-}
-
-// TestSecondTurnDoesNotRepeatSessionConfigOption drives two full turns against
-// a fake that echoes the family back as the model's currentValue (the way a
-// real agy session reports its selectors). Because sessionOptions now splits
-// the effort-qualified id into a family and a thought_level, both current
-// values match what the session already holds after the first turn. The second
-// SendTurn must therefore not push session/set_config_option again.
-func TestSecondTurnDoesNotRepeatSessionConfigOption(t *testing.T) {
-	dir := t.TempDir()
-	wirePath := dir + "/wire.log"
-	driver := newDriver(&fakePlugin{binary: os.Args[0], status: ports.AgentAuthStatusAuthorized}, nil)
-	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
-		SessionID: "agy-no-resend", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
-		Model: "gemini-4-hydrogen-high", Permissions: ports.PermissionModeAcceptEdits,
-		Env: map[string]string{
-			"AGY_ACP_FAKE": "1", "AGY_ACP_ARGV": dir + "/argv.txt",
-			"AGY_ACP_WIRE_LOG": wirePath, "AGY_ACP_MODELS": "1", "AGY_ACP_ECHO_CONFIG": "1",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() {
-		if stopper, ok := conv.(interface{ Terminate() error }); ok {
-			_ = stopper.Terminate()
-		}
-	})
-	_ = nextEvent(t, conv.Events()) // controller.ready from session setup
-
-	settings := ports.ChatTurnSettings{
-		Model: "gemini-4-hydrogen-high", Approval: ports.PermissionModeAcceptEdits,
-	}
-	// The first turn applies the family + thought_level; the fake echoes them
-	// back as the session's current values.
-	first, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{Text: "first", Settings: settings})
-	if err != nil {
-		t.Fatalf("first SendTurn: %v", err)
-	}
-	if err := conv.(ports.ChatDeferredTurnStarter).StartDeferredTurn(first.ProviderTurnID); err != nil {
-		t.Fatalf("first StartDeferredTurn: %v", err)
-	}
-	waitAgyCompletion(t, conv.Events(), first.ProviderTurnID)
-	waitWire(t, wirePath, "session/set_config_option")
-
-	before := countWire(t, wirePath, "session/set_config_option")
-	if before == 0 {
-		t.Fatal("first turn did not send any session/set_config_option")
-	}
-
-	// The second turn asks for the same model. The family currentValue echoed by
-	// the fake now matches the requested family, so no setter should fire.
-	second, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{Text: "second", Settings: settings})
-	if err != nil {
-		t.Fatalf("second SendTurn: %v", err)
-	}
-	if err := conv.(ports.ChatDeferredTurnStarter).StartDeferredTurn(second.ProviderTurnID); err != nil {
-		t.Fatalf("second StartDeferredTurn: %v", err)
-	}
-	waitAgyCompletion(t, conv.Events(), second.ProviderTurnID)
-
-	if after := countWire(t, wirePath, "session/set_config_option"); after != before {
-		body, _ := os.ReadFile(wirePath)
-		t.Fatalf("second turn re-sent session/set_config_option: before %d, after %d:\n%s", before, after, body)
-	}
-}
-
-func waitAgyCompletion(t *testing.T, events <-chan ports.ChatEvent, turnID string) {
-	t.Helper()
-	deadline := time.After(8 * time.Second)
-	for {
-		select {
-		case event := <-events:
-			if event.Kind == ports.ChatEventTurnCompleted && event.ProviderTurnID == turnID {
-				return
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			if tt.accounts != "" {
+				writeFile(t, filepath.Join(home, "google_accounts.json"), tt.accounts)
 			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for turn %q to complete", turnID)
-		}
-	}
-}
-
-type fakePlugin struct {
-	binary  string
-	status  ports.AgentAuthStatus
-	binErr  bool
-	resolve int
-}
-
-func (p *fakePlugin) ResolveBinary(context.Context) (string, error) {
-	p.resolve++
-	if p.binErr {
-		return "", ports.ErrAgentBinaryNotFound
-	}
-	if p.binary == "" {
-		return `C:\agy\bin\agy.exe`, nil
-	}
-	return p.binary, nil
-}
-
-func (p *fakePlugin) AuthStatus(context.Context) (ports.AgentAuthStatus, error) {
-	return p.status, nil
-}
-
-func containsArg(items []string, want string) bool {
-	for _, item := range items {
-		if item == want {
-			return true
-		}
-	}
-	return false
-}
-
-func wireContains(t *testing.T, path, needle string) bool {
-	t.Helper()
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(body), needle)
-}
-
-func countWire(t *testing.T, path, needle string) int {
-	t.Helper()
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read wire: %v", err)
-	}
-	return strings.Count(string(body), needle)
-}
-
-func nextEvent(t *testing.T, events <-chan ports.ChatEvent) ports.ChatEvent {
-	t.Helper()
-	select {
-	case event, ok := <-events:
-		if !ok {
-			t.Fatal("event stream closed")
-		}
-		return event
-	case <-time.After(8 * time.Second):
-		t.Fatal("timed out waiting for event")
-		return ports.ChatEvent{}
-	}
-}
-
-func waitWire(t *testing.T, path, needle string) {
-	t.Helper()
-	deadline := time.Now().Add(8 * time.Second)
-	for {
-		if wireContains(t, path, needle) {
-			return
-		}
-		if time.Now().After(deadline) {
-			body, _ := os.ReadFile(path)
-			t.Fatalf("wire missing %q:\n%s", needle, body)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-// runFakeStdio is the fake `agy acp` child. It writes its argv and pid for the
-// test, then answers the ACP handshake and session/new. It advertises no
-// top-level models field, so no startup model setter fires.
-func runFakeStdio() {
-	if argv := os.Getenv("AGY_ACP_ARGV"); argv != "" {
-		_ = os.WriteFile(argv, []byte(strings.Join(os.Args[1:], "\n")), 0o600)
-	}
-	if pidPath := os.Getenv("AGY_ACP_PID"); pidPath != "" {
-		f, err := os.OpenFile(pidPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			os.Exit(2)
-		}
-		_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
-		_ = f.Close()
-	}
-	logPath := os.Getenv("AGY_ACP_WIRE_LOG")
-	var logFile *os.File
-	if logPath != "" {
-		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			os.Exit(2)
-		}
-		logFile = f
-		defer logFile.Close()
-	}
-	logLine := func(line []byte) {
-		if logFile == nil {
-			return
-		}
-		_, _ = logFile.Write(append(append([]byte{}, line...), '\n'))
-		_ = logFile.Sync()
-	}
-
-	// When AGY_ACP_ECHO_CONFIG=1, session/set_config_option echoes back an
-	// authoritative catalog with the just-set value as currentValue, the way
-	// a real agy session updates its selectors. That lets a test verify the
-	// transport skips re-sending an unchanged option on a later turn.
-	echoConfig := os.Getenv("AGY_ACP_ECHO_CONFIG") == "1"
-	// configValues holds the live currentValue of each advertised selector.
-	configValues := map[string]any{}
-	if echoConfig {
-		configValues["model"] = agyFakeModelOption["currentValue"]
-		configValues["thought_level"] = agyFakeThoughtLevelOption["currentValue"]
-	}
-
-	in := bufio.NewScanner(os.Stdin)
-	in.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	out := bufio.NewWriter(os.Stdout)
-	defer out.Flush()
-	for in.Scan() {
-		line := append([]byte{}, in.Bytes()...)
-		logLine(line)
-		var msg struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-			Params json.RawMessage `json:"params"`
-		}
-		if err := json.Unmarshal(line, &msg); err != nil {
-			continue
-		}
-		if msg.Method == "" || len(msg.ID) == 0 || string(msg.ID) == "null" {
-			continue
-		}
-		var result any
-		switch msg.Method {
-		case "initialize":
-			result = map[string]any{
-				"protocolVersion": 1,
-				"agentInfo":       map[string]any{"name": "Antigravity ACP Server", "version": "1.5.5"},
-				"agentCapabilities": map[string]any{
-					"loadSession": true,
-					"sessionCapabilities": map[string]any{
-						"resume":                map[string]any{},
-						"additionalDirectories": map[string]any{},
-					},
-				},
+			if tt.settings != "" {
+				writeFile(t, filepath.Join(home, "antigravity-acp", "settings.json"), tt.settings)
 			}
-		case "session/new", "session/load", "session/resume":
-			result = map[string]any{"sessionId": "agy-session-1"}
-			if os.Getenv("AGY_ACP_MODELS") == "1" {
-				result = map[string]any{
-					"sessionId": "agy-session-1",
-					"configOptions": []any{
-						agyFakeModelOption,
-						agyFakeThoughtLevelOption,
-					},
-				}
-			}
-		case "session/set_config_option":
-			result = map[string]any{}
-			if echoConfig {
-				var params struct {
-					ConfigID string `json:"configId"`
-					Value    string `json:"value"`
-				}
-				if err := json.Unmarshal(msg.Params, &params); err == nil && params.ConfigID != "" {
-					configValues[params.ConfigID] = params.Value
-				}
-				modelOption := map[string]any{}
-				for k, v := range agyFakeModelOption {
-					modelOption[k] = v
-				}
-				modelOption["currentValue"] = configValues["model"]
-				thoughtOption := map[string]any{}
-				for k, v := range agyFakeThoughtLevelOption {
-					thoughtOption[k] = v
-				}
-				thoughtOption["currentValue"] = configValues["thought_level"]
-				result = map[string]any{
-					"configOptions": []any{modelOption, thoughtOption},
-				}
-			}
-		case "session/set_mode":
-			result = map[string]any{}
-		case "session/prompt":
-			result = map[string]any{"stopReason": "end_turn"}
-		default:
-			_ = writeJSON(out, map[string]any{
-				"jsonrpc": "2.0", "id": msg.ID,
-				"error": map[string]any{"code": -32601, "message": "method not found"},
+			var calls []string
+			b := newAuthBootstrap(func(map[string]string) (string, error) { return home, nil }, nil)
+			err := b.bootstrap(context.Background(), tt.init, nil, func(_ context.Context, method string) error {
+				calls = append(calls, method)
+				return nil
 			})
-			continue
-		}
-		_ = writeJSON(out, map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": result})
+			if err != nil {
+				t.Fatalf("bootstrap = %v", err)
+			}
+			if tt.wantCall != (len(calls) == 1 && calls[0] == "oauth-personal") || (!tt.wantCall && len(calls) != 0) {
+				t.Fatalf("authenticate calls = %v, want call=%v", calls, tt.wantCall)
+			}
+		})
 	}
 }
 
-func writeJSON(out *bufio.Writer, value any) error {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return err
+func TestAuthBootstrapChecksTheSessionGeminiHome(t *testing.T) {
+	daemonHome := t.TempDir()
+	sessionHome := t.TempDir()
+	writeFile(t, filepath.Join(sessionHome, "google_accounts.json"), `{"active":"session@example.com"}`)
+	t.Setenv("GEMINI_HOME", daemonHome)
+	init := acpsdk.InitializeResponse{AuthMethods: []acpsdk.AuthMethod{
+		{Agent: &acpsdk.AuthMethodAgent{Id: "oauth-personal", Name: "Log in with Google"}},
+	}}
+	calls := 0
+	b := newAuthBootstrap(agy.GeminiHome, nil)
+	if err := b.bootstrap(context.Background(), init, map[string]string{"GEMINI_HOME": sessionHome}, func(_ context.Context, _ string) error {
+		calls++
+		return nil
+	}); err != nil {
+		t.Fatalf("bootstrap = %v", err)
 	}
-	if _, err := out.Write(append(data, '\n')); err != nil {
-		return err
+	if calls != 1 {
+		t.Fatalf("authenticate calls = %d, want session sign-in to be detected", calls)
 	}
-	return out.Flush()
+}
+
+func TestAuthBootstrapBoundsAndReportsAFailedAuthenticate(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, "google_accounts.json"), `{"active":"me@example.com"}`)
+	init := acpsdk.InitializeResponse{AuthMethods: []acpsdk.AuthMethod{
+		{Agent: &acpsdk.AuthMethodAgent{Id: "oauth-personal", Name: "Log in with Google"}},
+	}}
+	b := newAuthBootstrap(func(map[string]string) (string, error) { return home, nil }, nil)
+	b.timeout = 50 * time.Millisecond
+	err := b.bootstrap(context.Background(), init, nil, func(ctx context.Context, _ string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("bootstrap = %v, want a bounded deadline error", err)
+	}
+}
+
+func TestAuthMethodIDReadsTheAdvertisedID(t *testing.T) {
+	var method acpsdk.AuthMethod
+	if err := json.Unmarshal([]byte(`{"id":"oauth-personal","name":"Log in with Google"}`), &method); err != nil {
+		t.Fatalf("decode auth method: %v", err)
+	}
+	if got := authMethodID(method); got != "oauth-personal" {
+		t.Fatalf("authMethodID = %q", got)
+	}
+}
+
+type fakePlugin struct{ status ports.AgentAuthStatus }
+
+func (f fakePlugin) ResolveBinary(context.Context) (string, error) { return "", errors.New("not used") }
+func (f fakePlugin) AuthStatus(context.Context) (ports.AgentAuthStatus, error) {
+	return f.status, nil
+}
+
+func testResolver(t *testing.T, env map[string]string) resolver {
+	t.Helper()
+	return resolver{
+		getenv: func(key string) string { return env[key] },
+		isFile: isExecutableFile,
+		resolveSpec: func(context.Context, binaryutil.BinarySpec) (string, error) {
+			return "", ports.ErrAgentBinaryNotFound
+		},
+	}
+}
+
+func samePath(t *testing.T, a, b string) bool {
+	t.Helper()
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && ra == rb
+}
+
+func writeExecutable(t *testing.T, path string) string {
+	t.Helper()
+	writeFile(t, path, "#!/bin/sh\n")
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSplitModelVariantMapsCLIIDsOntoServer14Options(t *testing.T) {
+	base, variant, ok := splitModelVariant("gemini-3.8-flash-medium")
+	want := acpdriver.SessionOption{ID: "thinking_level", Value: "medium", Optional: true}
+	if !ok || base != "gemini-3.8-flash" || variant != want {
+		t.Fatalf("split = %q, %+v, %v", base, variant, ok)
+	}
+	for _, model := range []string{"claude-opus-4-6-thinking", "gemini-3.8-flash", "-high"} {
+		if _, _, ok := splitModelVariant(model); ok {
+			t.Errorf("%q split, want it left alone", model)
+		}
+	}
+}
+
+// `agy acp` 1.5 lists these variant ids while its model option offers only the
+// bases, so each splits into the base and its reasoning level.
+func TestSplitModelVariantMapsAgyACP15IDs(t *testing.T) {
+	for model, want := range map[string]string{
+		"claude-opus-5-5-low":      "claude-opus-5-5",
+		"claude-sonnet-5-5-high":   "claude-sonnet-5-5",
+		"gemini-4-neon-xhigh":      "gemini-4-neon",
+		"gemini-4-hydrogen-medium": "gemini-4-hydrogen",
+	} {
+		base, variant, ok := splitModelVariant(model)
+		if !ok || base != want || variant.ID != thinkingLevelOption || !variant.Optional ||
+			model != base+"-"+variant.Value {
+			t.Errorf("split(%q) = %q, %+v, %v; want %q at its level", model, base, variant, ok, want)
+		}
+	}
+	if _, _, ok := splitModelVariant("gemini-pro-orchestrator-neon"); ok {
+		t.Error("gemini-pro-orchestrator-neon split, want it left alone")
+	}
+}
+
+func TestInstallCheckReportsAMissingServerWithoutStartingIt(t *testing.T) {
+	r := resolver{
+		getenv: func(string) string { return "" }, isFile: func(string) bool { return false },
+		resolveSpec: func(context.Context, binaryutil.BinarySpec) (string, error) {
+			return "", errors.New("not found")
+		},
+	}
+	err := buildConfig(fakePlugin{}, r, nil).InstallCheck(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "antigravity-acp") {
+		t.Fatalf("InstallCheck = %v, want the install hint", err)
+	}
+	r.resolveSpec = func(context.Context, binaryutil.BinarySpec) (string, error) { return "/bin/agy_acp_server", nil }
+	if err := buildConfig(fakePlugin{}, r, nil).InstallCheck(context.Background()); err != nil {
+		t.Fatalf("InstallCheck with a server = %v", err)
+	}
+}
+
+func TestAuthBootstrapAcceptsASignedInAgyCLI(t *testing.T) {
+	init := acpsdk.InitializeResponse{AuthMethods: []acpsdk.AuthMethod{
+		{Agent: &acpsdk.AuthMethodAgent{Id: "oauth-personal", Name: "Log in with Google"}},
+	}}
+	for _, tt := range []struct {
+		name     string
+		signedIn bool
+		wantCall bool
+	}{
+		{name: "agy signed in, no Gemini accounts file", signedIn: true, wantCall: true},
+		{name: "agy signed out: never risk a browser flow"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			b := newAuthBootstrap(
+				func(map[string]string) (string, error) { return home, nil },
+				func(context.Context, map[string]string) bool { return tt.signedIn },
+			)
+			calls := 0
+			if err := b.bootstrap(context.Background(), init, nil, func(context.Context, string) error {
+				calls++
+				return nil
+			}); err != nil {
+				t.Fatalf("bootstrap = %v", err)
+			}
+			if (calls == 1) != tt.wantCall {
+				t.Fatalf("authenticate calls = %d, want call=%v", calls, tt.wantCall)
+			}
+		})
+	}
+}
+
+func TestCLISignedInFollowsAgyModelsExitStatus(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("runs POSIX shell fixtures that Windows cannot execute")
+	}
+	dir := t.TempDir()
+	script := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	check := func(path string) bool {
+		return cliSignedIn(func(context.Context) (string, error) { return path, nil })(context.Background(), nil)
+	}
+	if !check(script("in", `[ "$1" = models ]`)) {
+		t.Error("exit 0 from agy models is a sign-in")
+	}
+	if check(script("out", "echo 'Please sign in' >&2; exit 1")) {
+		t.Error("a failing agy models is no sign-in")
+	}
+	if cliSignedIn(nil)(context.Background(), nil) {
+		t.Error("no CLI is no sign-in")
+	}
 }

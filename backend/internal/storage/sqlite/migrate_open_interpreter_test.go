@@ -164,13 +164,26 @@ func TestMigration20261116125847855CoexistsWithCodeBuddy(t *testing.T) {
 			db := openMigratedDatabaseCopy(t, beforeOpenInterpreterMigration)
 			// CodeBuddy's old 0207 draft migration or startup repair adds its harness.
 			// Some draft databases also recorded Open Interpreter at 0207.
-			harnessTail := "'codebuddy', 'fake'))"
-			if draftOpenInterpreter {
-				harnessTail = "'codebuddy', 'open-interpreter', 'fake'))"
+			// Only inject harnesses the draft would add that are not already in the
+			// constraint: this fork has a real CodeBuddy migration that ran before
+			// this version, so injecting it again would duplicate the entry.
+			var baseSchema string
+			if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'`).Scan(&baseSchema); err != nil {
+				t.Fatal(err)
 			}
-			mustExec(t, db, `PRAGMA writable_schema = ON`)
-			mustExec(t, db, `UPDATE sqlite_master SET sql = replace(sql, '''fake''))', ?) WHERE type = 'table' AND name = 'sessions'`, harnessTail)
-			mustExec(t, db, `PRAGMA writable_schema = RESET`)
+			var draft []string
+			if !strings.Contains(baseSchema, "'codebuddy'") {
+				draft = append(draft, "codebuddy")
+			}
+			if draftOpenInterpreter && !strings.Contains(baseSchema, "'open-interpreter'") {
+				draft = append(draft, "open-interpreter")
+			}
+			if len(draft) > 0 {
+				harnessTail := "'" + strings.Join(draft, "', '") + "', 'fake'))"
+				mustExec(t, db, `PRAGMA writable_schema = ON`)
+				mustExec(t, db, `UPDATE sqlite_master SET sql = replace(sql, '''fake''))', ?) WHERE type = 'table' AND name = 'sessions'`, harnessTail)
+				mustExec(t, db, `PRAGMA writable_schema = RESET`)
+			}
 			mustExec(t, db, `INSERT INTO goose_db_version (version_id, is_applied) VALUES (207, 1)`)
 			for range 2 {
 				if err := migrate(db); err != nil {

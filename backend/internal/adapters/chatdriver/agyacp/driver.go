@@ -113,7 +113,7 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 				env[disableWorkspaceTrustEnvVar] = "1"
 			}
 			if target.cli {
-				return acpdriver.Launch{Command: target.path, Args: cliLaunchArgs(env, resolve.getenv), Env: env}, nil
+				return acpdriver.Launch{Command: target.path, Args: cliLaunchArgs(env, resolve.getenv, cfg.AdditionalDirectories), Env: env}, nil
 			}
 			if env[harnessPathEnvVar] == "" {
 				if harness := resolve.harnessPath(target.path); harness != "" {
@@ -129,6 +129,13 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 		SessionOptions:      sessionOptions,
 		SplitModelVariant:   splitModelVariant,
 		SessionPreamble:     sessionPreamble,
+		// `agy acp` is a shell-executing agent bound to the session workspace,
+		// so multi-repo child directories are reachable from its cwd. Some agy
+		// versions do not advertise ACP additional-directories support and would
+		// reject a multi-repo spawn; the roots are granted on the CLI via
+		// --add-dir (see cliLaunchArgs), so mark them handled in ACP setup and
+		// do not send them on the wire.
+		ImplicitWorkspaceDirectories: true,
 		// Every request Antigravity raises is answered by the user, except under
 		// `agy acp` in AO's auto modes (see permissionPolicy). AO never selects
 		// allow_always, which would let a cached grant survive a later switch to
@@ -148,8 +155,12 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 // handoff find it, and a Chat started on the separate server resumes. `agy acp`
 // ignores the GEMINI_HOME variable and stores under its --gemini-dir, so a
 // GEMINI_HOME set for the session or inherited by the daemon is passed as that
-// flag, the same precedence agy.GeminiHome uses.
-func cliLaunchArgs(env map[string]string, getenv func(string) string) []string {
+// flag, the same precedence agy.GeminiHome uses. Each extra workspace root is
+// passed as --add-dir: `agy acp` is a shell-executing agent bound to the
+// session workspace, but some versions do not advertise ACP
+// additional-directories support, so AO grants the roots on the CLI here and
+// marks them handled in the ACP setup (ImplicitWorkspaceDirectories).
+func cliLaunchArgs(env map[string]string, getenv func(string) string, additionalDirectories []string) []string {
 	args := []string{"acp", "--app-data-dir", agy.ACPStorageDir}
 	home := strings.TrimSpace(env["GEMINI_HOME"])
 	if home == "" {
@@ -157,6 +168,13 @@ func cliLaunchArgs(env map[string]string, getenv func(string) string) []string {
 	}
 	if home != "" {
 		args = append(args, "--gemini-dir", home)
+	}
+	for _, dir := range additionalDirectories {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		args = append(args, "--add-dir", dir)
 	}
 	return args
 }

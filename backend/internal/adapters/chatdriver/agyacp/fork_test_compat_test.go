@@ -182,15 +182,20 @@ func runFakeStdio() {
 		var result any
 		switch msg.Method {
 		case "initialize":
+			sessionCapabilities := map[string]any{
+				"resume": map[string]any{},
+			}
+			// AGY_ACP_NO_ADDITIONAL_DIRS drives coverage for a server that does
+			// not advertise ACP additional-directories support.
+			if os.Getenv("AGY_ACP_NO_ADDITIONAL_DIRS") != "1" {
+				sessionCapabilities["additionalDirectories"] = map[string]any{}
+			}
 			result = map[string]any{
 				"protocolVersion": 1,
 				"agentInfo":       map[string]any{"name": "Antigravity ACP Server", "version": "1.5.5"},
 				"agentCapabilities": map[string]any{
-					"loadSession": true,
-					"sessionCapabilities": map[string]any{
-						"resume":                map[string]any{},
-						"additionalDirectories": map[string]any{},
-					},
+					"loadSession":         true,
+					"sessionCapabilities": sessionCapabilities,
 				},
 			}
 		case "session/new", "session/load", "session/resume":

@@ -62,7 +62,7 @@ func TestCreateDerivesOwnershipAndFixedDeliveryDeadlines(t *testing.T) {
 		{name: "checkpoint batches for one hour", input: CreateInput{State: domain.ReportCheckpoint, Note: "checkpoint"}, available: now.Add(time.Hour)},
 		{name: "needs input is immediate", input: CreateInput{State: domain.ReportNeedsInput, Note: "decision"}, available: now},
 		{name: "stuck is immediate", input: CreateInput{State: domain.ReportStuck, Note: "blocked"}, available: now},
-		{name: "done settles for one minute", input: CreateInput{State: domain.ReportDone, Note: "finished"}, available: now.Add(time.Minute), settles: now.Add(time.Minute)},
+		{name: "done settles for five minutes", input: CreateInput{State: domain.ReportDone, Note: "finished"}, available: now.Add(5 * time.Minute), settles: now.Add(5 * time.Minute)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -80,7 +80,7 @@ func TestCreateDerivesOwnershipAndFixedDeliveryDeadlines(t *testing.T) {
 	}
 }
 
-func TestCreateDoneReportSettlesInOneMinuteWhileNeedsInputIsImmediate(t *testing.T) {
+func TestCreateDoneReportSettlesInFiveMinutesWhileNeedsInputIsImmediate(t *testing.T) {
 	now := time.Date(2026, 9, 7, 1, 2, 3, 0, time.UTC)
 	st := &fakeStore{ok: true, session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker}}
 	s := New(Deps{Store: st, Now: func() time.Time { return now }, NewID: func() string { return "rpt_1" }})
@@ -89,14 +89,11 @@ func TestCreateDoneReportSettlesInOneMinuteWhileNeedsInputIsImmediate(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !done.AvailableAt.Equal(now.Add(time.Minute)) {
-		t.Fatalf("done AvailableAt = %s, want %s", done.AvailableAt, now.Add(time.Minute))
+	if !done.AvailableAt.Equal(now.Add(5 * time.Minute)) {
+		t.Fatalf("done AvailableAt = %s, want %s", done.AvailableAt, now.Add(5*time.Minute))
 	}
 	if done.AvailableAt.Equal(now) {
 		t.Fatal("done report must not be available immediately")
-	}
-	if done.AvailableAt.Equal(now.Add(5 * time.Minute)) {
-		t.Fatal("done report must no longer use the old five-minute settlement window")
 	}
 	if !done.SettlementDeadline.Equal(done.AvailableAt) {
 		t.Fatalf("done SettlementDeadline = %s, want AvailableAt %s", done.SettlementDeadline, done.AvailableAt)
@@ -113,7 +110,6 @@ func TestCreateDoneReportSettlesInOneMinuteWhileNeedsInputIsImmediate(t *testing
 		t.Fatalf("needs-input SettlementDeadline = %s, want zero", needsInput.SettlementDeadline)
 	}
 }
-
 func TestCreateDefendsValidationAndOwnership(t *testing.T) {
 	worker := &fakeStore{ok: true, session: domain.SessionRecord{ID: "ao-2", ProjectID: "ao", Kind: domain.KindWorker}}
 	for _, tc := range []struct {

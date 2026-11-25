@@ -32,6 +32,7 @@ in [gemini-cli.md](gemini-cli.md).
 | [harnesses/command-code.md](harnesses/command-code.md)   | Command Code TUI setup, activity hooks, Chat over `cmd acp`, exact restore, and current limits.                 |
 | [harnesses/qoder.md](harnesses/qoder.md)               | Qoder interactive TUI settings: model, effort, approval, install detection, and the separate chat driver.     |
 | [harnesses/codebuddy.md](harnesses/codebuddy.md)         | CodeBuddy Code interactive TUI: flags, install detection, and the unset chat capability.                        |
+| [harnesses/mastra-code.md](harnesses/mastra-code.md)     | Mastra Code TUI setup, isolated profile, login, direct model IDs, exact restore, and current limits.             |
 | [harnesses/stakpak.md](harnesses/stakpak.md)             | Stakpak Agent TUI setup, screen-read activity, permissions, exact restore, and current limits.                  |
 | [STATUS.md](STATUS.md)                                 | What is shipped on `main` today and what is still in flight.                                                          |
 | [stack.md](stack.md)                                   | Accepted library/runtime choices, pending stack decisions, and dependencies explicitly avoided for V1.                |

@@ -1,6 +1,5 @@
 import {
 	AgentAvatar as ProductAgentAvatar,
-	getAgentIdentity,
 	type AgentAvatarProps,
 	type AgentLogoSources,
 } from "@aoagents/product-ui";
@@ -14,6 +13,7 @@ import autohandDarkLogo from "../assets/agents/autohand-dark.svg";
 import autohandLightLogo from "../assets/agents/autohand-light.svg";
 import clineDarkLogo from "../assets/agents/cline-dark.svg";
 import clineLightLogo from "../assets/agents/cline-light.svg";
+import codebuddyLogo from "../assets/agents/codebuddy.svg";
 import claudeLogo from "../assets/agents/claude.svg";
 import claudeCodeLogo from "../assets/agents/claude-code.svg";
 import codexLogo from "../assets/agents/codex.svg";
@@ -53,10 +53,13 @@ import kimiLightLogo from "../assets/agents/kimi-light.svg";
 import kimchiLogo from "../assets/agents/kimchi.svg";
 import kiroLogo from "../assets/agents/kiro.svg";
 import museLogo from "../assets/agents/muse.svg";
+import mastraCodeLogo from "../assets/agents/mastra-code.svg";
 import mimoCodeLogo from "../assets/agents/mimo-code.svg";
 import minimaxCodeLogo from "../assets/agents/minimax-code.svg";
 import memcodeLogo from "../assets/agents/memcode.png";
 import ompLogo from "../assets/agents/omp.svg";
+import openInterpreterDarkLogo from "../assets/agents/open-interpreter-dark.svg";
+import openInterpreterLogo from "../assets/agents/open-interpreter.svg";
 import openhandsDarkLogo from "../assets/agents/openhands-dark.svg";
 import openhandsLightLogo from "../assets/agents/openhands-light.svg";
 import opencodeDarkLogo from "../assets/agents/opencode-dark.svg";
@@ -65,10 +68,12 @@ import piDarkLogo from "../assets/agents/pi-dark.svg";
 import piLightLogo from "../assets/agents/pi-light.svg";
 import primeAgentDarkLogo from "../assets/agents/prime-agent-dark.svg";
 import primeAgentLightLogo from "../assets/agents/prime-agent-light.svg";
+import qoderLogo from "../assets/agents/qoder.svg";
 import qwenDarkLogo from "../assets/agents/qwen-dark.svg";
 import qwenLightLogo from "../assets/agents/qwen-light.svg";
 // stakpak/agent (Apache-2.0): the mark from assets/stakpak-dark.png.
 import stakpakLogo from "../assets/agents/stakpak.png";
+import tauLogo from "../assets/agents/tau.png";
 import unrealAgentDarkLogo from "../assets/agents/unreal-agent-dark.png";
 import unrealAgentLightLogo from "../assets/agents/unreal-agent-light.png";
 import vibeLogo from "../assets/agents/vibe.svg";
@@ -78,10 +83,12 @@ import vibeLogo from "../assets/agents/vibe.svg";
 // background; a single mark reads on both. Agents without an asset fall back to
 // a lettered tile.
 const LOGOS: AgentLogoSources = {
+	"mastra-code": mastraCodeLogo,
 	codex: codexLogo,
 	codewhale: { light: codewhaleLightLogo, dark: codewhaleDarkLogo },
 	"command-code": { light: commandCodeLightLogo, dark: commandCodeDarkLogo },
 	"claude-code": claudeCodeLogo,
+	codebuddy: codebuddyLogo,
 	claude: claudeLogo,
 	cursor: { light: cursorLightLogo, dark: cursorDarkLogo },
 	opencode: { light: opencodeLightLogo, dark: opencodeDarkLogo },
@@ -94,6 +101,7 @@ const LOGOS: AgentLogoSources = {
 	droid: { light: droidLightLogo, dark: droidDarkLogo },
 	fx: { light: fxLightLogo, dark: fxDarkLogo },
 	crush: crushLogo,
+	qoder: qoderLogo,
 	qwen: { light: qwenLightLogo, dark: qwenDarkLogo },
 	goose: { light: gooseLightLogo, dark: gooseDarkLogo },
 	continue: { light: continueLightLogo, dark: continueDarkLogo },
@@ -105,6 +113,7 @@ const LOGOS: AgentLogoSources = {
 	stakpak: stakpakLogo,
 	omp: ompLogo,
 	openhands: { light: openhandsLightLogo, dark: openhandsDarkLogo },
+	"open-interpreter": { light: openInterpreterLogo, dark: openInterpreterDarkLogo },
 	kiro: kiroLogo,
 	kilocode: { light: kilocodeLightLogo, dark: kilocodeDarkLogo },
 	vibe: vibeLogo,
@@ -119,6 +128,7 @@ const LOGOS: AgentLogoSources = {
 	"unreal-agent": { light: unrealAgentLightLogo, dark: unrealAgentDarkLogo },
 	"mimo-code": mimoCodeLogo,
 	"minimax-code": minimaxCodeLogo,
+	tau: tauLogo,
 	"deepseek-harness": { light: deepseekHarnessLightLogo, dark: deepseekHarnessDarkLogo },
 };
 
@@ -134,25 +144,6 @@ const LOGOS: AgentLogoSources = {
  */
 export function AgentAvatar({ provider, className, decorative = false }: AgentAvatarProps) {
 	return <ProductAgentAvatar className={className} decorative={decorative} logoSources={LOGOS} provider={provider} />;
-}
-
-/** The logo an agent draws, or none. */
-function logoFor(provider: string): AgentLogoSources[string] {
-	const key = getAgentIdentity(provider).logoKey;
-	return key ? LOGOS[key] : undefined;
-}
-
-function sameLogo(a: AgentLogoSources[string], b: AgentLogoSources[string]): boolean {
-	if (!a || !b) return false;
-	if (typeof a === "string" || typeof b === "string") return a === b;
-	return a.light === b.light && a.dark === b.dark;
-}
-
-/** Whether another agent draws the same logo (OpenCode and OpenCode 2), so the mark alone does not name the agent. */
-export function sharesAgentMark(provider: string): boolean {
-	const logo = logoFor(provider);
-	const own = getAgentIdentity(provider).logoKey;
-	return Object.entries(LOGOS).some(([key, other]) => key !== own && sameLogo(logo, other));
 }
 
 export type { AgentAvatarProps };

@@ -1042,7 +1042,7 @@ func TestSubmitApprovedWritesWorkerAndReviewerReports(t *testing.T) {
 	}
 
 	reporter.notes = nil
-	st.run.Status, st.run.Verdict = domain.ReviewRunComplete, domain.VerdictApproved
+	st.run.Status, st.run.Verdict = domain.ReviewRunCompleted, domain.VerdictApproved
 	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictApproved, "looks good", "9"); err != nil {
 		t.Fatalf("resubmit: %v", err)
 	}
@@ -1072,7 +1072,7 @@ func TestSubmitRetriesTheMissingApprovalReport(t *testing.T) {
 	}
 
 	// The verdict is now stored, which is exactly the state a retry sees.
-	st.run.Status, st.run.Verdict = domain.ReviewRunComplete, domain.VerdictApproved
+	st.run.Status, st.run.Verdict = domain.ReviewRunCompleted, domain.VerdictApproved
 	reporter.failAfter = 0
 	reporter.notes = nil
 	if _, err := svc.Submit(context.Background(), "mer-1", "run-1", domain.VerdictApproved, "looks good", "9"); err != nil {

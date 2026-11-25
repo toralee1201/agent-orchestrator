@@ -13,6 +13,7 @@ import autohandDarkLogo from "../assets/agents/autohand-dark.svg";
 import autohandLightLogo from "../assets/agents/autohand-light.svg";
 import clineDarkLogo from "../assets/agents/cline-dark.svg";
 import clineLightLogo from "../assets/agents/cline-light.svg";
+import codebuddyLogo from "../assets/agents/codebuddy.svg";
 import claudeLogo from "../assets/agents/claude.svg";
 import claudeCodeLogo from "../assets/agents/claude-code.svg";
 import codexLogo from "../assets/agents/codex.svg";
@@ -67,6 +68,7 @@ import piDarkLogo from "../assets/agents/pi-dark.svg";
 import piLightLogo from "../assets/agents/pi-light.svg";
 import primeAgentDarkLogo from "../assets/agents/prime-agent-dark.svg";
 import primeAgentLightLogo from "../assets/agents/prime-agent-light.svg";
+import qoderLogo from "../assets/agents/qoder.svg";
 import qwenDarkLogo from "../assets/agents/qwen-dark.svg";
 import qwenLightLogo from "../assets/agents/qwen-light.svg";
 // stakpak/agent (Apache-2.0): the mark from assets/stakpak-dark.png.
@@ -86,6 +88,7 @@ const LOGOS: AgentLogoSources = {
 	codewhale: { light: codewhaleLightLogo, dark: codewhaleDarkLogo },
 	"command-code": { light: commandCodeLightLogo, dark: commandCodeDarkLogo },
 	"claude-code": claudeCodeLogo,
+	codebuddy: codebuddyLogo,
 	claude: claudeLogo,
 	cursor: { light: cursorLightLogo, dark: cursorDarkLogo },
 	opencode: { light: opencodeLightLogo, dark: opencodeDarkLogo },
@@ -98,6 +101,7 @@ const LOGOS: AgentLogoSources = {
 	droid: { light: droidLightLogo, dark: droidDarkLogo },
 	fx: { light: fxLightLogo, dark: fxDarkLogo },
 	crush: crushLogo,
+	qoder: qoderLogo,
 	qwen: { light: qwenLightLogo, dark: qwenDarkLogo },
 	goose: { light: gooseLightLogo, dark: gooseDarkLogo },
 	continue: { light: continueLightLogo, dark: continueDarkLogo },

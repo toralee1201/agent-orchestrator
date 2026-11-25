@@ -806,7 +806,7 @@ func TestTriggerDoesNotRequireTestPassWithoutConfiguredCommand(t *testing.T) {
 func TestTriggerNotifyCarriesProjectReviewBrief(t *testing.T) {
 	store := &fakeStore{
 		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, ReviewerHandleID: "review-mer-1", AgentSessionID: "native-reviewer-1"},
-		runs:   []domain.ReviewRun{{ID: "run-0", SessionID: "mer-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha0", Status: domain.ReviewRunComplete}},
+		runs:   []domain.ReviewRun{{ID: "run-0", SessionID: "mer-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha0", Status: domain.ReviewRunCompleted}},
 	}
 	launcher := &fakeLauncher{alive: true}
 	worker := liveWorker()
